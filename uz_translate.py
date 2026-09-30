@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -465,12 +466,35 @@ LLM_TIMEOUT = 90
 # rejimi sof tarjimadan barqarorroq. thinkingLevel=minimal: 28 s -> ~4-18 s (kechqurun
 # serverlar band, 503 ham beradi - keyingi model, so'ng Google).
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+# LIMITNI KO'PAYTIRISH (2026-10-01): bepul limit har LOYIHA (kalit) va har MODEL uchun
+# alohida kunlik: 3.5-flash 20, 3.5-flash-lite 500, 3.1-flash-lite 500 (429 javobidan).
+# Shuning uchun: bir nechta kalit (vergul bilan, har biri boshqa Google akkaunti/loyihasi)
+# va ko'proq model. Band (503) yoki limiti tugagan model vaqtincha chetlab o'tiladi.
+GEMINI_KEYS = [k.strip() for k in GEMINI_KEY.split(",") if k.strip()]
 GEMINI_MODELS = [m for m in os.getenv(
     "GEMINI_MODELS",
     # "model:fikrlash". 3.5-flash (lite emas) haqiqiy bobda jonliroq: "What are you talking
     # about?" -> lite "nima derkan-bu?", flash "Nimalar deyapsan?"; ~11 s/sahifa (fonda).
-    "gemini-3.5-flash:low,gemini-3.5-flash-lite:minimal,gemini-3.1-flash-lite:minimal").split(",") if m]
-GEMINI_TIMEOUT = 35
+    # 3.6/3.7/3.8-flash, 3-flash-preview, 3.1-flash-lite-preview, gemma-4-31b - bepul tarifda
+    # ochiq (2026-10-01 sinovi), har birining o'z kunlik limiti. 3.8-flash "minimal"ni qabul qilmaydi.
+    "gemini-3.5-flash:low,gemini-3.8-flash:low,gemini-3.7-flash:low,gemini-3.6-flash:low,"
+    "gemini-3-flash-preview:low,gemini-3.5-flash-lite:minimal,gemini-3.1-flash-lite:minimal,"
+    "gemini-3.1-flash-lite-preview:minimal,gemma-4-31b-it").split(",") if m]
+GEMINI_TIMEOUT = 25
+_cooldown: dict[tuple[int, str], float] = {}   # (kalit, model) -> shu vaqtgacha ishlatilmaydi
+
+
+def _rest(k: int, model: str, code: int | None, body: str) -> None:
+    """Xatoga qarab (kalit, model) juftini dam oldiradi - har sahifada behuda kutmaslik uchun."""
+    if code == 429 and "PerDay" in body:
+        wait = 3 * 3600            # kunlik limit tugagan (yangilanishi - Toshkent ~12:00)
+    elif code == 429:
+        wait = 60                  # daqiqalik limit
+    elif code in (400, 403, 404):
+        wait = 24 * 3600           # bu kalitga model yopiq / so'rov shakli mos emas
+    else:
+        wait = 300                 # 503 band, 500, vaqt tugadi - har sahifada 25 s kutmaylik
+    _cooldown[(k, model)] = time.time() + wait
 _GEMINI_SYSTEM = """You are a professional manhwa (Korean webcomic) translator into Uzbek.
 Translate each speech bubble into natural, lively, CONVERSATIONAL Uzbek (Latin script, use o' and g').
 Rules:
@@ -550,30 +574,49 @@ def _gemini(english: list[str], drafts: list[str]) -> list[str] | None:
                 + json.dumps(_ctx[-8:], ensure_ascii=False) + "\n\n" + user)
     # Haqiqiy sinovda 3.5-flash-lite bir marta buzuq JSON, 3.1-flash-lite 503 berdi va
     # butun sahifa Google'ning quruq tarjimasida qoldi. Endi har model 2 marta, oraliqda kutib.
+    system = _system_prompt()
     for attempt in range(2):
         for spec in GEMINI_MODELS:
-            model, _, level = spec.partition(":")
-            body = json.dumps({
-                "systemInstruction": {"parts": [{"text": _system_prompt()}]},
-                "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json",
-                                     "thinkingConfig": {"thinkingLevel": level or "minimal"}},
-            }).encode("utf-8")
+          model, _, level = spec.partition(":")
+          for k, key in enumerate(GEMINI_KEYS):
+            if _cooldown.get((k, model), 0) > time.time():
+                continue
+            if model.startswith("gemma"):
+                # Gemma: tizim ko'rsatmasi, JSON rejimi va fikrlash sozlamasi yo'q
+                payload = {"contents": [{"role": "user", "parts": [{"text": system + "\n\n" + user}]}],
+                           "generationConfig": {"temperature": 0.3}}
+            else:
+                payload = {
+                    "systemInstruction": {"parts": [{"text": system}]},
+                    "contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json",
+                                         "thinkingConfig": {"thinkingLevel": level or "minimal"}},
+                }
             req = urllib.request.Request(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                data=body, headers={"x-goog-api-key": GEMINI_KEY, "content-type": "application/json"})
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"x-goog-api-key": key, "content-type": "application/json"})
             try:
                 with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as r:
                     data = json.loads(r.read().decode("utf-8"))
-                text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+                text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"]
+                               if not p.get("thought"))
                 out = _parse_list(text)
                 if isinstance(out, list) and len(out) == len(english):
                     _ctx.extend(english)
                     del _ctx[:-8]
                     return [str(s or "") for s in out]
                 logger.info("Gemini %s: javob mos emas (%s)", model, text[:80])
+            except urllib.error.HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                _rest(k, model, exc.code, detail)
+                logger.info("Gemini %s (kalit %d) ishlamadi (HTTP %s)", model, k + 1, exc.code)
             except Exception as exc:
-                logger.info("Gemini %s ishlamadi (%s)", model, str(exc)[:120])
+                _rest(k, model, None, "")
+                logger.info("Gemini %s (kalit %d) ishlamadi (%s)", model, k + 1, str(exc)[:120])
         time.sleep(2 + 3 * attempt)
     return None
 
