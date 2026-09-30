@@ -457,8 +457,78 @@ def _clean_model(text: str) -> str:
 LLM_URL = os.getenv("TRANSLATE_LLM_URL", "")
 LLM_TIMEOUT = 90
 
+# GEMINI (2026-09-30, faqat @gardenhwa_bot - foydalanuvchi talabi; kalit GitHub sirida).
+# 40 ta haqiqiy gapda Google'dan aniq yaxshi: "Leave them behind, my ass!" -> Google
+# "..., eshak!", Gemini "Tashlab ketarmishmiz, aslo!"; "Secure baron iznik!" -> Google
+# "Xavfsiz baron iznik!", Gemini "Baron Iznikni qo'riqlang!". Google qoralamasini TAHRIRLASH
+# rejimi sof tarjimadan barqarorroq. thinkingLevel=minimal: 28 s -> ~4-18 s (kechqurun
+# serverlar band, 503 ham beradi - keyingi model, so'ng Google).
+GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODELS = [m for m in os.getenv(
+    "GEMINI_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m]
+GEMINI_TIMEOUT = 45
+_GEMINI_SYSTEM = """You are a professional manhwa (Korean webcomic) translator into Uzbek.
+Translate each speech bubble into natural, lively, CONVERSATIONAL Uzbek (Latin script, use o' and g').
+Rules:
+- Translate the MEANING and emotion the way Uzbek people really talk, never word-for-word.
+- Keep it short: it must fit in a speech bubble. Do not add anything that is not in the source.
+- Use the whole list as context: lines are consecutive bubbles of the same page/scene.
+- Lines come from OCR and may contain typos or merged words (e.g. "nassaual" = "Nassau", "Well strengthen" = "We'll strengthen"): silently fix them.
+- Keep character and place names unchanged (only fix OCR typos in them).
+- Honorifics: "my lord" = "hazratim", "young master" = "yosh xo'jayin", "big brother/hyung" = "aka", "noona/big sister" = "opa", "butler" = "xizmatkor", "duke" = "gersog".
+- Keep ending punctuation (!, ?, ?!, ...) and stutter (C-clear -> Y-yo'l). Sound effects -> Uzbek onomatopoeia.
+Return ONLY a JSON array of strings: exactly one Uzbek string per input line, same order."""
+
+
+def _gemini(english: list[str], drafts: list[str]) -> list[str] | None:
+    user = ("Each item is [English source, rough machine translation]. The machine translation is "
+            "usually accurate but stiff and literal. Write the final natural Uzbek line:\n"
+            + json.dumps([[e, d] for e, d in zip(english, drafts)], ensure_ascii=False))
+    body = json.dumps({
+        "systemInstruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json",
+                             "thinkingConfig": {"thinkingLevel": "minimal"}},
+    }).encode("utf-8")
+    for model in GEMINI_MODELS:
+        req = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            data=body, headers={"x-goog-api-key": GEMINI_KEY, "content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+            out = json.loads(text)
+            if isinstance(out, list) and len(out) == len(english):
+                return [str(s or "") for s in out]
+            logger.info("Gemini %s: javob uzunligi mos emas", model)
+        except Exception as exc:
+            logger.info("Gemini %s ishlamadi (%s)", model, str(exc)[:120])
+    return None
+
+
+def _sane(draft: str, polished: str) -> bool:
+    """AI qo'shib yubormadimi (pufakchaga sig'masin, ma'no o'zgarmasin)."""
+    return bool(polished.strip()) and len(polished) <= max(2.2 * len(draft), len(draft) + 25)
+
+
+def _fix_ai(text: str) -> str:
+    """Gemini'ning takrorlanuvchi mayda xatolari (40 gaplik sinovda ko'rilgan)."""
+    text = re.sub(r"(\w)my([?!.,…]|$)", r"\1mi\2", text)       # "otliqlarmy?!" -> "otliqlarmi?!"
+    text = re.sub(r"\bUnd(a|ada)?n? ko'ra", "Undan ko'ra", text)
+    text = re.sub(r",(?=\w)", ", ", text)                       # "ketarmishmiz,aslo"
+    return text
+
 
 def _llm_polish(english: list[str], drafts: list[str]) -> list[str] | None:
+    if GEMINI_KEY:
+        out: list[str] = []
+        for i in range(0, len(english), 20):            # uzun sahifa - bo'laklab
+            part = _gemini(english[i:i + 20], drafts[i:i + 20])
+            if part is None:
+                part = drafts[i:i + 20]                 # shu bo'lak Google'da qoladi
+            out += part
+        return [_fix_ai(p) if p != d and _sane(d, p) else d for p, d in zip(out, drafts)]
     body = json.dumps({"lines": english, "drafts": drafts}).encode("utf-8")
     req = urllib.request.Request(LLM_URL, data=body, headers={
         "x-key": os.getenv("GATE_KEY", ""), "content-type": "application/json",
@@ -524,7 +594,7 @@ def translate_many(texts: list[str]) -> list[str]:
     # AI tahriri: Google qoralamasini jonli, tabiiy o'zbekchaga aylantiradi va OCR
     # xatolarini tuzatadi ("nassaual" -> "Nassau"). Ishlamasa - Google natijasi qoladi.
     llm = [i for i in todo if result[i] and english[i] and not _sfx_uzbek(english[i])]
-    if llm and LLM_URL:
+    if llm and (LLM_URL or GEMINI_KEY):
         polished = _llm_polish([english[i] for i in llm], [result[i] for i in llm])
         for i, p in zip(llm, polished or []):
             if p and p.strip():
