@@ -85,6 +85,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     context.user_data.pop("await_rule", None)
     context.user_data.pop("await_sub", None)
+    context.user_data.pop("await_feedback", None)
     admins.remember_user(update.effective_user)
     if not admins.is_allowed(user_id):
         await update.effective_message.reply_text(
@@ -174,9 +175,20 @@ def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     if admins.is_superadmin(user_id):
         rows.append([_btn("👑 Adminlar", "m:admins")]
                     + ([_btn("📅 Bir oylik", "m:do:paid")] if admins.FREE_CHAPTERS else []))
+    status = ""
+    if admins.FREE_CHAPTERS and not admins.is_admin(user_id):
+        until = admins.sub_until(user_id)
+        left = max(0, admins.FREE_CHAPTERS - admins.used_chapters(user_id))
+        if until > time.time():
+            status = f"\n\n✅ Oylik obuna faol: <b>{_date(until)}</b> gacha."
+        elif left:
+            status = (f"\n\n🎁 Sizda <b>{left} ta bepul bob</b> bor - PDF yoki bir bob rasmlarini "
+                      "(albom qilib) yuboring.")
+        else:
+            status = "\n\n🎁 Bepul bobingizdan foydalandingiz. Davom etish uchun - 💳 Oylik obuna."
     return ((
         "📚 Bu bot manhwa sahifalarini <b>o'zbek tiliga tarjima</b> qiladi.\n\n"
-        "Rasm yoki PDF yuboring - yoki quyidagi bo'limlardan birini tanlang:"),
+        "Rasm yoki PDF yuboring - yoki quyidagi bo'limlardan birini tanlang:" + status),
         InlineKeyboardMarkup(rows))
 
 
@@ -201,6 +213,12 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _show(update, parts[1])
         return
     what = parts[2]
+    if what == "feedback":
+        context.user_data["await_feedback"] = True
+        await update.effective_message.reply_text(
+            "✏️ Tarjimadagi xatoni yozib yuboring (qaysi sahifa, nima noto'g'ri) - admin ko'radi.\n"
+            "Bekor qilish: /start")
+        return
     if what == "subadd":
         if not admins.is_superadmin(update.effective_user.id):
             return
@@ -223,6 +241,14 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                "admins": list_admins_cmd, "paid": paid_list_cmd}.get(what)
     if handler:
         await handler(update, context)
+
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not admins.is_superadmin(update.effective_user.id):
+        await update.effective_message.reply_text("Bu bo'lim faqat bot egasi uchun.")
+        return
+    text, markup = _screen("admins", update.effective_user.id)
+    await update.effective_message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -770,6 +796,19 @@ async def paid_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 
+def _mark_delivered() -> None:
+    if _current["job"] is not None:
+        _current["job"]["delivered"] = True
+
+
+def _after_markup() -> InlineKeyboardMarkup | None:
+    """Natija ostidagi tugmalar (ochiq botda): xato haqida yozish, menyu."""
+    if not admins.PUBLIC:
+        return None
+    return InlineKeyboardMarkup([[_btn("✏️ Xato haqida yozish", "m:do:feedback"),
+                                  _btn("🏠 Menyu", "m:main")]])
+
+
 def _refund(job: dict) -> None:
     """Bepul bob bajarilmay qolsa (bekor qilindi / xato) - hisobdan qaytariladi."""
     if job.get("free"):
@@ -800,6 +839,8 @@ async def _queue_worker() -> None:
             _refund(job)
             await _edit_status(job["status"], "Kechirasiz, kutilmagan xatolik yuz berdi.")
         finally:
+            if not job.get("delivered"):
+                _refund(job)            # natija yetib bormadi - bepul bob sarflanmaydi
             _current["job"] = None
             _queue.task_done()
 
@@ -1002,7 +1043,9 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 caption=caption,
                 # katta faylni sekin internetda yuklash uchun uzoqroq kutish
                 write_timeout=900, read_timeout=300,
+                reply_markup=_after_markup(),
             )
+            _mark_delivered()
             break
         except RetryAfter as exc:
             raw = getattr(exc, "retry_after", 5)
@@ -1050,6 +1093,7 @@ async def _process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, sta
         logger.info("Chizildi: %.0f KB", len(result_bytes) / 1024)
 
         await _send_result(context, chat_id, result_bytes, _caption(translations))
+        _mark_delivered()
         await status_msg.delete()
     except TranslationError as exc:
         logger.warning("Tarjima xatosi (user=%s): %s", update.effective_user.id, exc)
@@ -1084,11 +1128,12 @@ async def _send_result(context: ContextTypes.DEFAULT_TYPE, chat_id: int, image_b
                     chat_id=chat_id,
                     document=io.BytesIO(image_bytes),
                     filename="tarjima.jpg",
-                    caption=caption,
+                    caption=caption, reply_markup=_after_markup(),
                 )
             else:
                 await context.bot.send_photo(
-                    chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=caption
+                    chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=caption,
+                    reply_markup=_after_markup(),
                 )
             return
         except RetryAfter as exc:
@@ -1126,6 +1171,16 @@ async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if msg.text == MENU_BUTTON and admins.is_allowed(user_id):
         await show_menu(update, context)
+        return
+    if msg.text and context.user_data.pop("await_feedback", False):
+        u = update.effective_user
+        handle = f" (@{u.username})" if u.username else ""
+        try:
+            await context.bot.send_message(
+                OWNER_ID, f"✏️ Xato haqida xabar\nKimdan: {u.full_name}{handle}, ID: {u.id}\n\n{msg.text[:3500]}")
+            await msg.reply_text("Rahmat! Xabaringiz adminga yuborildi 🙏")
+        except TelegramError:
+            await msg.reply_text("Xabarni yuborib bo'lmadi, keyinroq qayta urinib ko'ring.")
         return
     if msg.text and context.user_data.pop("await_sub", False) and admins.is_superadmin(user_id):
         target = admins.find_user(msg.text)
@@ -1198,6 +1253,7 @@ def _build_app(token: str) -> Application:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("id", my_id))
     app.add_handler(CommandHandler("holat", status_cmd))
     app.add_handler(CommandHandler("navbat", queue_cmd))
