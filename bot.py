@@ -84,6 +84,8 @@ MENU_BUTTON = "🏠 Menyu"
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     context.user_data.pop("await_rule", None)
+    context.user_data.pop("await_sub", None)
+    admins.remember_user(update.effective_user)
     if not admins.is_allowed(user_id):
         await update.effective_message.reply_text(
             "Bu bot shaxsiy. Sizda hozircha foydalanish huquqi yo'q.\n"
@@ -107,6 +109,8 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
 def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Bo'limli menyu: har bo'lim bitta xabar ichida almashadi (m:<bo'lim>)."""
     back = [_btn("⬅️ Orqaga", "m:main")]
+    if name == "obuna":
+        return _sub_panel(user_id)
     if name == "tarjima":
         return ((
             "🌐 <b>Tarjima</b>\n\n"
@@ -143,7 +147,7 @@ def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
             "yoki u /start bossin - sizga tugmali so'rov keladi\n"
             "• Ro'yxatda har admin yonida o'chirish tugmasi bor"),
             InlineKeyboardMarkup([[_btn("👥 Adminlar ro'yxati", "m:do:admins")]]
-                                 + ([[_btn("💳 To'lov qilganlar", "m:do:paid")]] if admins.FREE_CHAPTERS else [])
+                                 + ([[_btn("📅 Bir oylik", "m:do:paid")]] if admins.FREE_CHAPTERS else [])
                                  + [back]))
     if name == "yordam":
         text = (
@@ -165,8 +169,11 @@ def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     else:
         rows = [[_btn("🌐 Tarjima", "m:tarjima"), _btn("⚙️ Holat", "m:holat")],
                 [_btn("ℹ️ Yordam", "m:yordam")]]
+        if admins.FREE_CHAPTERS:
+            rows.insert(0, [_btn(f"💳 Oylik obuna - chegirmada {SUB_PRICE} 🔥", "m:obuna")])
     if admins.is_superadmin(user_id):
-        rows.append([_btn("👑 Adminlar", "m:admins")])
+        rows.append([_btn("👑 Adminlar", "m:admins")]
+                    + ([_btn("📅 Bir oylik", "m:do:paid")] if admins.FREE_CHAPTERS else []))
     return ((
         "📚 Bu bot manhwa sahifalarini <b>o'zbek tiliga tarjima</b> qiladi.\n\n"
         "Rasm yoki PDF yuboring - yoki quyidagi bo'limlardan birini tanlang:"),
@@ -194,6 +201,14 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _show(update, parts[1])
         return
     what = parts[2]
+    if what == "subadd":
+        if not admins.is_superadmin(update.effective_user.id):
+            return
+        context.user_data["await_sub"] = True
+        await update.effective_message.reply_text(
+            "✍️ Obunachining @username'ini yoki ID raqamini yuboring - unga hozirdan boshlab "
+            f"{admins.SUB_DAYS} kunlik obuna beriladi.\nBekor qilish: /start")
+        return
     if what == "qoida":
         if not admins.is_admin(update.effective_user.id):
             return
@@ -547,6 +562,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"document({msg.document.mime_type}, {msg.document.file_name})" if msg.document else "?"
     )
     logger.info("QABUL QILINDI: user=%s, tur=%s", user_id, kind)
+    admins.remember_user(update.effective_user)
 
     if not admins.is_allowed(user_id):
         await update.effective_message.reply_text(
@@ -572,7 +588,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         group = msg.media_group_id
         if not (group and _free_groups.get(user_id) == group):
             if admins.used_chapters(user_id) >= admins.FREE_CHAPTERS:
-                await msg.reply_text(await _limit_text(context, user_id))
+                text, markup = _sub_panel(user_id)
+                await msg.reply_text(text, reply_markup=markup, parse_mode="HTML")
                 await _ask_owner_to_pay(context, update.effective_user)
                 return
             admins.add_used(user_id)
@@ -607,27 +624,50 @@ _free_groups: dict[int, str] = {}      # bepul bob sifatida qabul qilingan albom
 _owner_contact: dict = {}
 
 
+SUB_PRICE = os.getenv("SUB_PRICE", "50 000 so'm")
+SUB_OLD_PRICE = os.getenv("SUB_OLD_PRICE", "")      # bo'lsa - ustidan chizilgan eski narx
+
+
+def _owner_name() -> str:
+    return os.getenv("OWNER_USERNAME", "").lstrip("@")
+
+
+def _date(ts: float) -> str:
+    """Toshkent vaqti (UTC+5): 01.11.2026 00:14"""
+    return time.strftime("%d.%m.%Y %H:%M", time.gmtime(ts + 5 * 3600))
+
+
+def _sub_panel(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Foydalanuvchiga: oylik obuna narxi va egasining akkaunti (bosganda yozishma ochiladi)."""
+    until = admins.sub_until(user_id)
+    old = f"<s>{SUB_OLD_PRICE}</s> " if SUB_OLD_PRICE else ""
+    if until > time.time():
+        status = f"✅ Obunangiz faol: <b>{_date(until)}</b> gacha."
+    elif until:
+        status = "⌛ Obunangiz tugagan."
+    else:
+        left = max(0, admins.FREE_CHAPTERS - admins.used_chapters(user_id))
+        status = f"🎁 Bepul boblar qoldi: <b>{left}</b> ta."
+    text = (f"💳 <b>Oylik obuna</b>\n\n"
+            f"🔥 Chegirmada: {old}<b>{SUB_PRICE}</b> / {admins.SUB_DAYS} kun\n"
+            f"• {admins.SUB_DAYS} kun davomida cheklovsiz tarjima\n\n{status}\n\n"
+            f"To'lov uchun pastdagi tugmani bosib, egasiga yozing va ID'ingizni yuboring: "
+            f"<code>{user_id}</code>")
+    rows = []
+    if _owner_name():
+        rows.append([InlineKeyboardButton(f"✍️ @{_owner_name()} ga yozish",
+                                          url=f"https://t.me/{_owner_name()}")])
+    rows.append([_btn("⬅️ Orqaga", "m:main")])
+    return text, InlineKeyboardMarkup(rows)
+
+
 async def _limit_text(context, user_id: int) -> str:
-    """Bepul bob tugaganda - bot egasining akkaunti (username) bilan xabar."""
-    if "text" not in _owner_contact:
-        name = os.getenv("OWNER_USERNAME", "").lstrip("@")
-        if not name:
-            try:
-                name = (await context.bot.get_chat(OWNER_ID)).username or ""
-            except TelegramError:
-                name = ""
-        who = f"@{name}" if name else f"bot egasiga (ID: {OWNER_ID})"
-        _owner_contact["text"] = who
-    n = admins.FREE_CHAPTERS
-    return (f"Siz bepul {n} ta bobdan foydalanib bo'ldingiz. 🙏\n\n"
-            f"Qolgan boblarni ham tarjima qilmoqchi bo'lsangiz, shu odam bilan bog'laning: "
-            f"{_owner_contact['text']}\n\n"
-            f"To'lovdan keyin sizga ruxsat beriladi va bot cheklovsiz ishlaydi.\n"
-            f"Sizning ID'ingiz: {user_id} (yozganingizda shuni ham yuboring)")
+    """Bepul bob tugaganda (yoki obuna tugaganda) - panel matni."""
+    return _sub_panel(user_id)[0]
 
 
 async def _ask_owner_to_pay(context, user) -> None:
-    """Bepul bobi tugagan odam haqida egasiga - bitta tugma bilan ruxsat berish uchun."""
+    """Bepul bobi tugagan odam haqida egasiga - bitta tugma bilan 1 oylik berish uchun."""
     if not OWNER_ID or user.id == OWNER_ID:
         return
     key = f"tolov_sorovi_{user.id}"
@@ -640,15 +680,15 @@ async def _ask_owner_to_pay(context, user) -> None:
             chat_id=OWNER_ID,
             text=(f"💳 Bepul bobi tugagan foydalanuvchi:\n\n"
                   f"Ism: {user.full_name or user.id}{handle}\nID: {user.id}\n\n"
-                  f"To'lov qilsa - pastdagi tugma bilan ruxsat bering."),
+                  f"To'lov qilsa - pastdagi tugma bilan 1 oylik bering."),
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ To'ladi - ruxsat berish", callback_data=f"paid:{user.id}")]]))
+                InlineKeyboardButton("✅ To'ladi - 1 oylik berish", callback_data=f"paid:{user.id}")]]))
     except TelegramError as exc:
         logger.warning("Egasiga to'lov xabari yuborilmadi: %s", exc)
 
 
 async def on_paid_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """paid:<id> - ruxsat berish, unpaid:<id> - ruxsatni olish (faqat super admin)."""
+    """paid:<id> - 1 oy qo'shish, unpaid:<id> - obunani olish (faqat bot egasi)."""
     query = update.callback_query
     if not admins.is_superadmin(query.from_user.id):
         await query.answer("Bu tugma faqat bot egasi uchun.", show_alert=True)
@@ -658,20 +698,29 @@ async def on_paid_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _set_paid(context, int(raw), action == "paid", query=query)
 
 
+async def _label(context, uid: int) -> str:
+    try:
+        chat = await context.bot.get_chat(uid)
+        name = chat.full_name or str(uid)
+        return f"{name} (@{chat.username})" if chat.username else name
+    except TelegramError:
+        return str(uid)
+
+
 async def _set_paid(context, target: int, grant: bool, query=None, message=None) -> None:
+    who = await _label(context, target)
     if grant:
-        changed = admins.add_paid(target)
-        text = f"{target} - ruxsat berildi ✅" if changed else f"{target} ga allaqachon ruxsat berilgan."
-        if changed:
-            try:
-                await context.bot.send_message(
-                    target, "✅ To'lovingiz qabul qilindi - endi botdan cheklovsiz foydalanishingiz mumkin.\n"
-                            "Keyingi bobning PDF faylini yoki rasmlarini yuboring.")
-            except TelegramError:
-                text += " (unga xabar yetib bormadi)"
+        until = admins.add_paid(target)
+        text = f"✅ {who} ({target}) - obuna {_date(until)} gacha."
+        try:
+            await context.bot.send_message(
+                target, f"✅ To'lovingiz qabul qilindi! Obuna faol: {_date(until)} gacha.\n"
+                        "Endi botdan cheklovsiz foydalanishingiz mumkin - bobning PDF faylini yoki rasmlarini yuboring.")
+        except TelegramError:
+            text += "\n(unga xabar yetib bormadi - u botga hali /start bosmagan bo'lishi mumkin)"
     else:
         changed = admins.remove_paid(target)
-        text = f"{target} - ruxsat olib tashlandi 🚫" if changed else f"{target} ruxsat berilganlar ro'yxatida yo'q."
+        text = f"🚫 {who} ({target}) - obuna olib tashlandi." if changed else f"{target} obunachilar ro'yxatida yo'q."
     if query is not None:
         await query.edit_message_text(text)
     elif message is not None:
@@ -679,40 +728,46 @@ async def _set_paid(context, target: int, grant: bool, query=None, message=None)
 
 
 async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/ruxsat <id> - ruxsat berish, /ruxsat - ro'yxat; /ruxsatolish <id> - olib tashlash."""
+    """/oylik <@username|id> - 1 oy berish (/oylik - ro'yxat); /oylikolish <@username|id> - olish."""
     if not admins.is_superadmin(update.effective_user.id):
         await update.effective_message.reply_text("Bu buyruq faqat bot egasi uchun.")
         return
-    grant = (update.effective_message.text or "").split()[0].lower().startswith("/ruxsat") and \
-        not (update.effective_message.text or "").lower().startswith("/ruxsatolish")
-    if context.args and context.args[0].isdigit():
-        await _set_paid(context, int(context.args[0]), grant, message=update.effective_message)
+    cmd = (update.effective_message.text or "").split()[0].lower()
+    grant = "olish" not in cmd
+    if context.args:
+        target = admins.find_user(context.args[0])
+        if target is None:
+            await update.effective_message.reply_text(
+                f"{context.args[0]} topilmadi. U botga kamida bir marta /start yozgan bo'lishi kerak - "
+                "yoki uning ID raqamini yuboring (ID'ni u botdagi 💳 Oylik obuna bo'limida ko'radi).")
+            return
+        await _set_paid(context, target, grant, message=update.effective_message)
         return
     if not grant:
-        await update.effective_message.reply_text("Foydalanish: /ruxsatolish <id>")
+        await update.effective_message.reply_text("Foydalanish: /oylikolish @username yoki ID")
         return
     await paid_list_cmd(update, context)
 
 
 async def paid_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """📅 Bir oylik bo'limi: obunachilar, qolgan kunlar, +1 oy / olib tashlash tugmalari."""
     if not admins.is_superadmin(update.effective_user.id):
         return
-    ids = admins.list_paid()
+    now = time.time()
     lines, buttons = [], []
-    for i in ids:
-        label = str(i)
-        try:
-            chat = await context.bot.get_chat(i)
-            label = chat.full_name or chat.username or str(i)
-        except TelegramError:
-            pass
-        lines.append(f"• {label} ({i})")
-        buttons.append([InlineKeyboardButton(f"🚫 {label} - ruxsatni olish", callback_data=f"unpaid:{i}")])
+    for uid, until in admins.list_paid():
+        who = await _label(context, uid)
+        if until > now:
+            lines.append(f"✅ {who} - {_date(until)} gacha ({int((until - now) // 86400)} kun qoldi)")
+        else:
+            lines.append(f"⌛ {who} - tugagan ({_date(until)})")
+        buttons.append([InlineKeyboardButton(f"🔁 +1 oy: {who}"[:60], callback_data=f"paid:{uid}"),
+                        InlineKeyboardButton("🗑", callback_data=f"unpaid:{uid}")])
+    buttons.append([_btn("➕ Odam qo'shish (1 oy)", "m:do:subadd")])
     await update.effective_message.reply_text(
-        "💳 To'lov qilib, ruxsat olganlar:\n" + ("\n".join(lines) or "Hozircha hech kim.") +
-        "\n\nQo'shish: /ruxsat <id>  (yoki bepul bobi tugaganda keladigan tugma)\n"
-        "Olib tashlash: /ruxsatolish <id>",
-        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+        "📅 <b>Bir oylik obunachilar</b>\n\n" + ("\n".join(html.escape(x) for x in lines) or "Hozircha hech kim.") +
+        "\n\nQo'shish: tugmani bosib @username yoki ID yuboring, yoki /oylik @username",
+        reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 
 def _refund(job: dict) -> None:
@@ -1072,6 +1127,15 @@ async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if msg.text == MENU_BUTTON and admins.is_allowed(user_id):
         await show_menu(update, context)
         return
+    if msg.text and context.user_data.pop("await_sub", False) and admins.is_superadmin(user_id):
+        target = admins.find_user(msg.text)
+        if target is None:
+            context.user_data["await_sub"] = True
+            await msg.reply_text(f"{msg.text.strip()} topilmadi. U botga kamida bir marta /start yozgan "
+                                 "bo'lishi kerak. Uning ID raqamini yuboring yoki /start bilan bekor qiling.")
+            return
+        await _set_paid(context, target, True, message=msg)
+        return
     if msg.text and context.user_data.pop("await_rule", False) and admins.is_admin(user_id):
         n = admins.add_rule(msg.text.strip()[:300])
         uz_translate._cache.clear()
@@ -1142,8 +1206,8 @@ def _build_app(token: str) -> Application:
     app.add_handler(CommandHandler("addadmin", add_admin_cmd))
     app.add_handler(CommandHandler("removeadmin", remove_admin_cmd))
     app.add_handler(CommandHandler("qoida", rules_cmd))
-    app.add_handler(CommandHandler("ruxsat", paid_cmd))
-    app.add_handler(CommandHandler("ruxsatolish", paid_cmd))
+    app.add_handler(CommandHandler(["oylik", "ruxsat"], paid_cmd))
+    app.add_handler(CommandHandler(["oylikolish", "ruxsatolish"], paid_cmd))
     app.add_handler(CommandHandler("qoidaochir", remove_rule_cmd))
     app.add_handler(MessageHandler(
         filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_photo))
