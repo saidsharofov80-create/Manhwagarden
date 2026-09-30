@@ -971,6 +971,11 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
             inner, touched, shape = filled
             if touched:
                 inner = _limit_area(inner, box)
+                if RENDER_V2:
+                    # OCHIQ pufakcha (chizig'i uzuq, oq panel bilan qo'shilib ketgan): topilgan
+                    # "shakl" butun panel - matn pufakcha chizig'idan va sahifa chetidan chiqib
+                    # ketardi (foydalanuvchi skrinshoti, 2026-09-30). Asl matn joyida qolamiz.
+                    inner, shape = _open_bubble_box(inner, box, W, H), None
             # O'Z-O'ZINI TEKSHIRISH: asl harflar haqiqatan o'childimi? Qaysi sabab
             # bilan bo'lmasin (harf teshigi, sahifa cheti, g'ayrioddiy pufakcha)
             # o'chmay qolgan bo'lsa - qolgan siyoh inpaint bilan o'chiriladi.
@@ -1086,6 +1091,16 @@ def _merge_same_bubble(jobs: list) -> list:
         else:
             out.append(job)
     return out
+
+
+def _open_bubble_box(inner, box, W: int, H: int):
+    """Ochiq pufakcha uchun yozish qutisi: asl matn qutisi, ozgina kengaytirilgan."""
+    x1, y1, x2, y2 = box
+    bw, bh = x2 - x1, y2 - y1
+    mx, my = int(bw * 0.06), int(bh * 0.25)
+    edge = int(W * 0.03)                    # sahifa chetiga yopishmasin
+    return (max(inner[0], x1 - mx, edge), max(inner[1], y1 - my),
+            min(inner[2], x2 + mx, W - edge), min(inner[3], y2 + my, H))
 
 
 def _limit_area(inner: tuple[int, int, int, int], text_box: tuple[int, int, int, int]):
