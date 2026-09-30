@@ -20,6 +20,7 @@ from telegram.ext import (
 
 import admins
 import pdf_utils
+import uz_translate
 from config import BASE_DIR, BOT_SUFFIX, BOT_TOKEN, OWNER_ID
 from image_editor import render_translation
 from translator import TranslationError, finish_page, read_page, translate_page
@@ -96,7 +97,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Buyruqlar:\n"
         "/holat — bot va AI tayyormi, tekshirish\n"
         "/navbat — navbatdagi ishlar (o'zingiznikini bekor qilish mumkin)\n"
-        "/id — Telegram ID'ingizni ko'rish"
+        "/id — Telegram ID'ingizni ko'rish\n"
+        "/qoida — AI'ga tarjima ko'rsatmalari (masalan: /qoida xotinim = rafiqam)"
     )
     if admins.is_superadmin(user_id):
         text += (
@@ -362,6 +364,43 @@ async def remove_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"{del_id} adminlikdan olib tashlandi.")
     else:
         await update.message.reply_text("Bu ID admin emas yoki bot egasini olib bo'lmaydi.")
+
+
+async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/qoida <matn> - AI tarjimoniga ko'rsatma qo'shish; /qoida - ro'yxat."""
+    if not admins.is_allowed(update.effective_user.id):
+        await update.message.reply_text("Bu buyruq faqat adminlar uchun.")
+        return
+    text = update.message.text.partition(" ")[2].strip()
+    if text:
+        n = admins.add_rule(text[:300])
+        uz_translate._cache.clear()          # eski tarjimalar qayta ishlatilmasin
+        await update.message.reply_text(f"✅ {n}-qoida qo'shildi. Keyingi boblardan boshlab AI shunga amal qiladi.")
+        return
+    rules = admins.list_rules()
+    body = "\n".join(f"{i}. {r}" for i, r in enumerate(rules, 1)) or "Hozircha qoida yo'q."
+    await update.message.reply_text(
+        "📝 Tarjima qoidalari (AI shularga amal qiladi):\n" + body + "\n\n"
+        "Qo'shish: /qoida xotinim = rafiqam\n"
+        "yoki erkin gap: /qoida Duke'ni doim gersog deb tarjima qil\n"
+        "O'chirish: /qoidaochir <raqam>\n\n"
+        "«A = B» ko'rinishidagi qoida AI ishlamay qolsa ham majburan almashtiriladi "
+        "(faqat aynan shu so'z: «xotinimga» uchun alohida qoida kerak).")
+
+
+async def remove_rule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not admins.is_allowed(update.effective_user.id):
+        await update.message.reply_text("Bu buyruq faqat adminlar uchun.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Foydalanish: /qoidaochir <raqam> (raqamlar: /qoida)")
+        return
+    gone = admins.remove_rule(int(context.args[0]))
+    if gone is None:
+        await update.message.reply_text("Bunday raqamli qoida yo'q. Ro'yxat: /qoida")
+        return
+    uz_translate._cache.clear()
+    await update.message.reply_text(f"🗑 O'chirildi: {gone}")
 
 
 async def _keep_typing(bot, chat_id: int) -> None:
@@ -816,6 +855,8 @@ def _build_app(token: str) -> Application:
     app.add_handler(CommandHandler("admins", list_admins_cmd))
     app.add_handler(CommandHandler("addadmin", add_admin_cmd))
     app.add_handler(CommandHandler("removeadmin", remove_admin_cmd))
+    app.add_handler(CommandHandler("qoida", rules_cmd))
+    app.add_handler(CommandHandler("qoidaochir", remove_rule_cmd))
     app.add_handler(MessageHandler(
         filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_photo))
     # Qolgan hamma narsa (buyruqlardan tashqari) - jim qolmaslik uchun

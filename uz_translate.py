@@ -506,6 +506,41 @@ def _parse_list(text: str) -> list | None:
     return out if isinstance(out, list) else None
 
 
+_RULE_PAIR = re.compile(r"^\s*(.+?)\s*(?:=>|->|→|=)\s*(.+?)\s*$")
+
+
+def _user_rules() -> list[str]:
+    try:
+        import admins
+        return admins.list_rules()
+    except Exception:
+        return []
+
+
+def _system_prompt() -> str:
+    rules = _user_rules()
+    if not rules:
+        return _GEMINI_SYSTEM
+    return (_GEMINI_SYSTEM + "\n\nEDITOR'S RULES (set by the human editor - they OVERRIDE everything "
+            "above, always follow them; \"A = B\" means: never write A, write B instead):\n"
+            + "\n".join(f"- {r}" for r in rules))
+
+
+def apply_rules(text: str) -> str:
+    """`xotinim = rafiqam` ko'rinishidagi qoidalar - AI ishlamasa ham (Google natijasida) almashadi."""
+    for rule in _user_rules():
+        m = _RULE_PAIR.match(rule)
+        if not m or len(m.group(1)) > 40:
+            continue
+        old, new = m.group(1), m.group(2)
+
+        def sub(mt, new=new):
+            w = mt.group(0)
+            return new[:1].upper() + new[1:] if w[:1].isupper() else new
+        text = re.sub(r"(?<!\w)" + re.escape(old) + r"(?!\w)", sub, text, flags=re.IGNORECASE)
+    return text
+
+
 def _gemini(english: list[str], drafts: list[str]) -> list[str] | None:
     user = ("Each item is [English source, rough machine translation]. The machine translation is "
             "usually accurate but stiff and literal. Write the final natural Uzbek line:\n"
@@ -519,7 +554,7 @@ def _gemini(english: list[str], drafts: list[str]) -> list[str] | None:
         for spec in GEMINI_MODELS:
             model, _, level = spec.partition(":")
             body = json.dumps({
-                "systemInstruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
+                "systemInstruction": {"parts": [{"text": _system_prompt()}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
                 "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json",
                                      "thinkingConfig": {"thinkingLevel": level or "minimal"}},
@@ -656,6 +691,8 @@ def translate_many(texts: list[str]) -> list[str]:
         if i in todo and result[i]:
             r = capitalize_first(t, restore_punctuation(t, r))
             _cache[t] = r
+        if r:
+            r = apply_rules(r)
         if stut[i][1] and r:
             r = add_stutter(r)
         final.append(r)

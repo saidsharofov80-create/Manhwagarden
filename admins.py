@@ -90,3 +90,28 @@ def remove_admin(user_id: int) -> bool:
     data["admins"].remove(user_id)
     _save(data)
     return True
+
+
+# TARJIMA QOIDALARI (2026-09-30): adminlar AI'ga beradigan ko'rsatmalar
+# ("xotinim = rafiqam", "Duke'ni doim 'gersog' deb yoz"). Adminlar bilan bir faylda -
+# Cloudflare'ga ham birga saqlanadi (runner diski har safar yangi).
+def list_rules() -> list[str]:
+    return list(_load().get("rules", []))
+
+
+def add_rule(text: str) -> int:
+    data = _load()
+    data.setdefault("rules", []).append(text)
+    _save(data)
+    return len(data["rules"])
+
+
+def remove_rule(n: int) -> str | None:
+    """n - 1 dan boshlanadigan tartib raqami."""
+    data = _load()
+    rules = data.get("rules", [])
+    if not 1 <= n <= len(rules):
+        return None
+    gone = rules.pop(n - 1)
+    _save(data)
+    return gone
