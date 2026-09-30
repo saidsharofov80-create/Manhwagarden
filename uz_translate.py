@@ -70,6 +70,9 @@ def normalize_source(text: str) -> str:
     t = re.sub(r"([!?.])\1{3,}", r"\1\1\1", t)
     # OCR ko'p nuqtaning bittasini yo'qotadi: "CHECK.." -> "CHECK..."
     t = re.sub(r"(?<!\.)\.\.(?!\.)", "...", t)
+    # OCR oldingi pufakchaning nuqtasini boshiga yopishtiradi: ".THAT'S TRUE." ->
+    # Google ".bu haqiqat." qilardi (haqiqiy bob). "..." bilan boshlanishi saqlanadi.
+    t = re.sub(r"^\.(?!\.)\s*", "", t)
     return t
 
 
@@ -365,6 +368,31 @@ def _clean_model(text: str) -> str:
     return t[:300].strip()
 
 
+# ---------------------------------------------------------------- AI tahriri
+
+# Foydalanuvchilar "sifatsiz" deb norozi bo'ldi: Google ma'noni to'g'ri beradi, lekin
+# quruq, so'zma-so'z ("bizning shaxs edi", "Anavi yerda!!"). manhwa-gate /translate
+# (Cloudflare Workers AI, gpt-oss-120b) Google tarjimasini qoralama sifatida olib,
+# jonli qiladi. 40 ta haqiqiy gapda sinalgan: sof AI tarjimasidan ham, sof Google'dan
+# ham yaxshi (scratchpad cfbench.py). Kunlik bepul limit tugasa - Google qoladi.
+LLM_URL = os.getenv("TRANSLATE_LLM_URL", "")
+LLM_TIMEOUT = 90
+
+
+def _llm_polish(english: list[str], drafts: list[str]) -> list[str] | None:
+    body = json.dumps({"lines": english, "drafts": drafts}).encode("utf-8")
+    req = urllib.request.Request(LLM_URL, data=body, headers={
+        "x-key": os.getenv("GATE_KEY", ""), "content-type": "application/json",
+        "user-agent": "manhwa-bot/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
+            uz = json.loads(r.read().decode("utf-8")).get("uz")
+    except Exception as exc:
+        logger.info("AI tahriri ishlamadi, Google tarjimasi qoladi (%s)", exc)
+        return None
+    return uz if isinstance(uz, list) and len(uz) == len(english) else None
+
+
 # ---------------------------------------------------------------- asosiy API
 
 def translate_many(texts: list[str]) -> list[str]:
@@ -413,6 +441,15 @@ def translate_many(texts: list[str]) -> list[str]:
             sfx = _sfx_uzbek(english[i])
             if sfx:
                 result[i] = sfx
+
+    # AI tahriri: Google qoralamasini jonli, tabiiy o'zbekchaga aylantiradi va OCR
+    # xatolarini tuzatadi ("nassaual" -> "Nassau"). Ishlamasa - Google natijasi qoladi.
+    llm = [i for i in todo if result[i] and english[i] and not _sfx_uzbek(english[i])]
+    if llm and LLM_URL:
+        polished = _llm_polish([english[i] for i in llm], [result[i] for i in llm])
+        for i, p in zip(llm, polished or []):
+            if p and p.strip():
+                result[i] = p
 
     for i in todo:
         if result[i] is not None:

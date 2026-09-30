@@ -27,6 +27,11 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install -r requirements.txt
           BOT_TOKEN=x OWNER_ID=1 .venv/bin/python -c "import fast_ocr; fast_ocr.warm_up()"
+      - name: Shrift (Digital Strip, Blambot - repoga qo'yilmaydi, litsenziya)
+        continue-on-error: true
+        run: |
+          curl -fsSL -o /tmp/ds.zip "https://dl.dafont.com/dl/?f=digital_strip"
+          unzip -oj /tmp/ds.zip digistrip.ttf -d assets/fonts
       - name: Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN_UZ }}
@@ -36,4 +41,6 @@ jobs:
           ADMINS_URL: https://manhwa-gate-uz.compass-crm.workers.dev/admins
           OCR_ENGINE: fast
           BOT_SLOT: "1"
+          # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
+          IDLE_EXIT: "999999"
         run: .venv/bin/python runner.py

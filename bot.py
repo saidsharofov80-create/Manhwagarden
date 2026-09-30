@@ -602,8 +602,9 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
             logger.warning("PDF %d-sahifa tarjima bo'lmadi: %s", num, exc)
             read, failed = [], failed + [num]
         pending.append(asyncio.create_task(finish(jpeg, read)))
-        # Xotira to'lmasin: fonda ko'pi bilan 3 ta sahifa
-        while sum(not t.done() for t in pending) > 3:
+        # Xotira to'lmasin: fonda ko'pi bilan 6 ta sahifa (AI tahriri sahifaga ~10 s
+        # tarmoqni kutadi - 3 ta bo'lsa OCR'ni to'xtatib qo'yardi)
+        while sum(not t.done() for t in pending) > 6:
             await asyncio.wait([t for t in pending if not t.done()], return_when=asyncio.FIRST_COMPLETED)
     for page_bytes, n in await asyncio.gather(*pending):
         out_pages.append(page_bytes)

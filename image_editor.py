@@ -32,8 +32,13 @@ BASE_DIR = Path(__file__).resolve().parent
 # yozilgandek qiya harflarga o'xshaydi. Foydalanuvchi fikri (2026-09-30):
 # "shriftni to'g'rilash kerak" - Montserrat oddiy sayt shrifti edi.
 # Boshqasini FONT_FILE muhit o'zgaruvchisi bilan berish mumkin.
+# 2026-09-30 (foydalanuvchi namuna rasm yubordi - klassik skanlatsiya shrifti, to'g'ri,
+# qalin, KATTA harf): Digital Strip (Blambot) + FONT_BOLD qalinlik namunaga eng yaqin.
+# Litsenziyasi notijorat komiksga bepul, lekin QAYTA TARQATISH MUMKIN EMAS - ochiq
+# repoga qo'yilmaydi: GitHub workflow uni blambot/dafont'dan o'zi yuklaydi (.gitignore).
 FONT_CANDIDATES = [
     os.getenv("FONT_FILE", ""),
+    BASE_DIR / "assets" / "fonts" / "digistrip.ttf",
     BASE_DIR / "assets" / "fonts" / "ShantellSans-BoldItalic.ttf",
     BASE_DIR / "assets" / "fonts" / "Montserrat-Bold.ttf",
     r"C:\Windows\Fonts\DejaVuSans-Bold.ttf",
@@ -55,6 +60,18 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
         except OSError:
             continue
     return ImageFont.load_default()
+
+
+# Qalinlik (sun'iy bold): harf o'z rangida shuncha chiziq bilan qalinlashadi.
+# Digital Strip o'zi ingichka - namunadagidek bo'lishi uchun ~3.5% o'lchamdan.
+FONT_BOLD = float(os.getenv("FONT_BOLD", "0.028"))
+FONT_UPPER = os.getenv("FONT_UPPER", "1") == "1"
+
+
+def _bold(font) -> int:
+    if "digistrip" not in str(getattr(font, "path", "")).lower():
+        return 0
+    return max(1, round(font.size * FONT_BOLD)) if FONT_BOLD > 0 else 0
 
 
 def _dominant_color(region: Image.Image) -> tuple[int, int, int]:
@@ -391,8 +408,13 @@ def _draw_block(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text:
     cur_y = iy1 + ((iy2 - iy1) - lh * len(lines)) // 2
     for line in lines:
         line_w = draw.textlength(line, font=font)
-        draw.text((ix1 + ((ix2 - ix1) - line_w) // 2, cur_y), line, font=font, fill=color,
-                  stroke_width=sw, stroke_fill=stroke)
+        x = ix1 + ((ix2 - ix1) - line_w) // 2
+        if stroke:
+            # kontur tagida, qalinlik (o'z rangida) ustida
+            draw.text((x, cur_y), line, font=font, fill=color, stroke_width=sw + _bold(font),
+                      stroke_fill=stroke)
+        draw.text((x, cur_y), line, font=font, fill=color,
+                  stroke_width=_bold(font), stroke_fill=color)
         cur_y += lh
 
 
@@ -409,8 +431,9 @@ def display_text(text: str, upper: bool) -> str:
     Asl yozuv katta harfda bo'lsa, tarjima ham katta harfda (skanlatsiya uslubi).
     """
     t = re.sub(r"([OoGg])'", r"\1‘", text)
-    t = t.replace("'", "’")
-    return t.upper() if upper else t
+    t = t.replace("'", "’").replace("—", "-")   # Digital Strip'da "—" yo'q
+    # Namuna (2026-09-30): skanlatsiya uslubi - doim KATTA harf. FONT_UPPER=0 - asl uslub.
+    return t.upper() if upper or FONT_UPPER else t
 
 
 def _shape_depth(shape) -> np.ndarray:
@@ -505,7 +528,8 @@ def _draw_in_shape(draw, shape, text_box, text: str, color, max_size: int | None
         for i, (line, (a, b)) in enumerate(zip(lines, spans)):
             w = draw.textlength(line, font=font)
             x = min(max(cx - w / 2, a), b - w)
-            draw.text((ox + x, oy + top + i * lh), line, font=font, fill=color)
+            draw.text((ox + x, oy + top + i * lh), line, font=font, fill=color,
+                      stroke_width=_bold(font), stroke_fill=color)
         return True
     return False
 
