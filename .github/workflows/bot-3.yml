@@ -43,6 +43,8 @@ jobs:
           # @gardenhwa_bot bilan teng: Gemini tarjima tahriri (hozircha @gardenhwa_bot kaliti) + tozalash v2
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY_3 }}
           RENDER_V2: "1"
+          # Faqat shu botda: pufakcha shakliga qarab shrift (oval/to'rtburchak/tikanli/rasm ustida)
+          FONT_STYLES: "1"
           BOT_SLOT: "1"
           # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
           IDLE_EXIT: "999999"

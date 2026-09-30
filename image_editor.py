@@ -15,6 +15,7 @@ Ikki nozik joyi bor (sinovda ko'rilgan nuqsonlar shu yerda tuzatilgan):
 import logging
 import os
 import re
+import threading
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
@@ -50,8 +51,34 @@ _COLOR_TOLERANCE = 70   # pufakcha rangidan shuncha farq qilsa ham "pufakcha ich
 _MIN_SPAN = 4           # qatordagi eng kichik to'ldiriladigan kenglik
 
 
-@lru_cache(maxsize=64)
+# FONT_STYLES (2026-09-30, faqat @Manhwatarjima1_bot - foydalanuvchi: "to'rtburchakda
+# boshqacha, boshqa shaklda boshqacha"): pufakcha SHAKLIGA qarab shrift tanlanadi -
+#   speech (dumaloq/oval pufakcha) - Digital Strip (asosiy skanlatsiya shrifti)
+#   box    (to'rtburchak - hikoya/tizim oynasi) - Comic Neue Bold Italic
+#   shout  (tikanli/portlovchi - baqiriq) - Bangers
+#   art    (pufakchasiz, rasm ustidagi yozuv) - Shantell Sans Bold Italic
+# Hammasi OFL (Digital Strip'dan tashqari) va o'zbekcha o‘/g‘ belgilari bor.
+FONT_STYLES = os.getenv("FONT_STYLES", "") == "1"
+_FONTS_DIR = BASE_DIR / "assets" / "fonts"
+STYLE_FONTS = {
+    "box": _FONTS_DIR / "ComicNeue-BoldItalic.ttf",
+    "shout": _FONTS_DIR / "Bangers-Regular.ttf",
+    "art": _FONTS_DIR / "ShantellSans-BoldItalic.ttf",
+}
+_style = threading.local()       # hozir chizilayotgan matn uslubi (sahifalar parallel bo'lishi mumkin)
+
+
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
+    return _load_font_style(size, getattr(_style, "name", "speech") if FONT_STYLES else "speech")
+
+
+@lru_cache(maxsize=256)
+def _load_font_style(size: int, style: str) -> ImageFont.FreeTypeFont:
+    if style in STYLE_FONTS:
+        try:
+            return ImageFont.truetype(str(STYLE_FONTS[style]), size)
+        except OSError:
+            pass
     for path in FONT_CANDIDATES:
         if not path:
             continue
@@ -807,6 +834,39 @@ def _draw_sfx_label(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], t
               stroke_width=max(2, size // 8), stroke_fill=(0, 0, 0))
 
 
+def _bubble_style(shape, touched: int) -> str:
+    """Pufakcha shakli: 'box' (to'rtburchak), 'shout' (tikanli) yoki 'speech' (oval).
+
+    Sintetik sinov (oval / to'rtburchak / 18 tishli yulduz): to'rtburchaklik 0.78 / 0.99 / 0.71,
+    perimetr : qobiq perimetri 1.05 / 1.00 / 1.40. Qidiruv oynasiga sig'magan (touched)
+    pufakchada kesilgan chet to'g'ri chiziq bo'ladi - u holda 'box' deb aytilmaydi.
+    """
+    if shape is None:
+        return "speech"
+    try:
+        import cv2
+
+        fill = shape[2].astype(np.uint8)
+        cnts, _ = cv2.findContours(fill, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not cnts:
+            return "speech"
+        c = max(cnts, key=cv2.contourArea)
+        area = cv2.contourArea(c)
+        x, y, w, h = cv2.boundingRect(c)
+        if area < 400 or not w or not h:
+            return "speech"
+        hull = cv2.convexHull(c)
+        jag = cv2.arcLength(c, True) / max(1.0, cv2.arcLength(hull, True))
+        solid = area / max(1.0, cv2.contourArea(hull))
+        if jag > 1.2 or solid < 0.8:
+            return "shout"
+        if not touched and area / (w * h) >= 0.9:
+            return "box"
+    except Exception:
+        pass
+    return "speech"
+
+
 def render_translation(image_bytes: bytes, translations: list[dict], quality: int = 95) -> bytes:
     image = load_image(image_bytes)
     arr = np.array(image)
@@ -876,7 +936,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
                             100 * after / before)
                 _erase_ink(arr, box, bg_color)
             jobs.append(("bubble", inner, bg_color, uzbek_text, max_size, shape, box, upper,
-                         ink_color))
+                         ink_color, _bubble_style(shape, touched)))
         else:
             area = _inpaint_text(arr, box)
             jobs.append(("art", area, None, uzbek_text, max_size))
@@ -888,6 +948,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
     draw = ImageDraw.Draw(out)
     for job in jobs:
         mode, box, bg_color, text, extra = job[:5]
+        _style.name = job[9] if mode == "bubble" else mode
         if mode == "bubble":
             color = job[8] or _text_color_for(bg_color)
             shape, tbox = job[5], job[6]
@@ -903,6 +964,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
         else:
             _draw_sfx_label(draw, box, text, W, H, extra or 40)
 
+    _style.name = "speech"
     return encode_jpeg(out, quality=quality)
 
 
@@ -962,7 +1024,8 @@ def _merge_same_bubble(jobs: list) -> list:
                     tb = (min(prev[6][0], job[6][0]), min(prev[6][1], job[6][1]),
                           max(prev[6][2], job[6][2]), max(prev[6][3], job[6][3]))
                     out[k] = ("bubble", prev[1], prev[2], prev[3] + " " + job[3],
-                              min(sizes) if sizes else None, prev[5], tb, prev[7], prev[8])
+                              min(sizes) if sizes else None, prev[5], tb, prev[7], prev[8],
+                              prev[9])
                     break
             else:
                 out.append(job)
