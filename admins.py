@@ -52,8 +52,19 @@ def _save(data: dict) -> None:
             logging.getLogger(__name__).warning("Adminlar ro'yxati saqlanmadi: %s", exc)
 
 
-def is_allowed(user_id: int) -> bool:
+# PUBLIC_BOT=1 (2026-09-30, faqat @Manhwatarjima1_bot - foydalanuvchi: "hamma foydalana
+# oladigan qilib ber"): tarjimadan HAMMA foydalanadi; qoidalar, adminlar va boshqalarning
+# navbatdagi ishlari esa faqat adminlarga (is_admin).
+PUBLIC = os.getenv("PUBLIC_BOT", "") == "1"
+
+
+def is_admin(user_id: int) -> bool:
     return user_id == OWNER_ID or user_id in _load()["admins"]
+
+
+def is_allowed(user_id: int) -> bool:
+    """Botdan (tarjimadan) foydalana oladimi."""
+    return PUBLIC or is_admin(user_id)
 
 
 def is_owner(user_id: int) -> bool:

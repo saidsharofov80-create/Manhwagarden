@@ -45,6 +45,8 @@ jobs:
           RENDER_V2: "1"
           # Faqat shu botda: pufakcha shakliga qarab shrift (oval/to'rtburchak/tikanli/rasm ustida)
           FONT_STYLES: "1"
+          # Ochiq bot: tarjimadan hamma foydalanadi (qoidalar/adminlar - faqat adminlarga)
+          PUBLIC_BOT: "1"
           BOT_SLOT: "1"
           # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
           IDLE_EXIT: "999999"

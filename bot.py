@@ -147,15 +147,20 @@ def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
             "/start - menyu\n"
             "/holat - bot va AI tayyormi\n"
             "/navbat - navbatdagi ishlar (o'zingiznikini bekor qilish mumkin)\n"
-            "/qoida &lt;matn&gt; - AI'ga tarjima qoidasi qo'shish\n"
-            "/qoidaochir &lt;raqam&gt; - qoidani o'chirish\n"
             "/id - Telegram ID'ingiz")
+        if admins.is_admin(user_id):
+            text += ("\n/qoida &lt;matn&gt; - AI'ga tarjima qoidasi qo'shish\n"
+                     "/qoidaochir &lt;raqam&gt; - qoidani o'chirish")
         if admins.is_superadmin(user_id):
             text += ("\n\n👑 <b>Super admin:</b>\n/admins - adminlar ro'yxati\n"
                      "/addadmin &lt;id&gt; - admin qo'shish\n/removeadmin &lt;id&gt; - adminni o'chirish")
         return text, InlineKeyboardMarkup([back])
-    rows = [[_btn("🌐 Tarjima", "m:tarjima"), _btn("📝 Qoidalar", "m:qoidalar")],
-            [_btn("⚙️ Holat", "m:holat"), _btn("ℹ️ Yordam", "m:yordam")]]
+    if admins.is_admin(user_id):
+        rows = [[_btn("🌐 Tarjima", "m:tarjima"), _btn("📝 Qoidalar", "m:qoidalar")],
+                [_btn("⚙️ Holat", "m:holat"), _btn("ℹ️ Yordam", "m:yordam")]]
+    else:
+        rows = [[_btn("🌐 Tarjima", "m:tarjima"), _btn("⚙️ Holat", "m:holat")],
+                [_btn("ℹ️ Yordam", "m:yordam")]]
     if admins.is_superadmin(user_id):
         rows.append([_btn("👑 Adminlar", "m:admins")])
     return ((
@@ -179,11 +184,15 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not admins.is_allowed(update.effective_user.id):
         return
     parts = query.data.split(":")
+    if parts[1] == "qoidalar" and not admins.is_admin(update.effective_user.id):
+        parts[1] = "main"
     if parts[1] != "do":
         await _show(update, parts[1])
         return
     what = parts[2]
     if what == "qoida":
+        if not admins.is_admin(update.effective_user.id):
+            return
         context.user_data["await_rule"] = True
         await update.effective_message.reply_text(
             "✍️ Qoidani yozib yuboring. Masalan:\n"
@@ -288,7 +297,7 @@ async def add_by_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if sender.id == OWNER_ID:
         await msg.reply_text("Bu sizning xabaringiz.")
         return True
-    if admins.is_allowed(sender.id):
+    if admins.is_admin(sender.id):
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🗑 Adminlikdan olish", callback_data=f"remove:{sender.id}")
         ]])
@@ -463,7 +472,7 @@ async def remove_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/qoida <matn> - AI tarjimoniga ko'rsatma qo'shish; /qoida - ro'yxat."""
-    if not admins.is_allowed(update.effective_user.id):
+    if not admins.is_admin(update.effective_user.id):
         await update.effective_message.reply_text("Bu buyruq faqat adminlar uchun.")
         return
     text = update.message.text.partition(" ")[2].strip() if update.message else ""
@@ -489,7 +498,7 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def on_rule_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not admins.is_allowed(update.effective_user.id):
+    if not admins.is_admin(update.effective_user.id):
         await query.answer()
         return
     gone = admins.remove_rule(int(query.data.split(":", 1)[1]))
@@ -503,7 +512,7 @@ async def on_rule_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def remove_rule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not admins.is_allowed(update.effective_user.id):
+    if not admins.is_admin(update.effective_user.id):
         await update.effective_message.reply_text("Bu buyruq faqat adminlar uchun.")
         return
     if not context.args or not context.args[0].isdigit():
@@ -600,11 +609,16 @@ async def queue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not admins.is_allowed(user_id):
         return
     sup = admins.is_superadmin(user_id)
+    see_all = admins.is_admin(user_id)
     lines, buttons = [], []
     cur = _current["job"]
     if cur:
-        lines.append(f"▶️ Hozir: {cur['name']} ({cur['who']})")
+        mine = see_all or cur["user"] == user_id
+        lines.append(f"▶️ Hozir: {cur['name']} ({cur['who']})" if mine else "▶️ Hozir: boshqa foydalanuvchi ishi")
     for pos, job in enumerate(_waiting, start=1):
+        if not see_all and job["user"] != user_id:
+            lines.append(f"{pos}. boshqa foydalanuvchi ishi")
+            continue
         lines.append(f"{pos}. {job['name']} ({job['who']})")
         if sup or job["user"] == user_id:
             buttons.append([InlineKeyboardButton(f"❌ {pos}-o'rinni bekor qilish",
@@ -912,7 +926,7 @@ async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if msg.text == MENU_BUTTON and admins.is_allowed(user_id):
         await show_menu(update, context)
         return
-    if msg.text and context.user_data.pop("await_rule", False) and admins.is_allowed(user_id):
+    if msg.text and context.user_data.pop("await_rule", False) and admins.is_admin(user_id):
         n = admins.add_rule(msg.text.strip()[:300])
         uz_translate._cache.clear()
         await msg.reply_text(f"✅ {n}-qoida qo'shildi. Keyingi boblardan boshlab AI shunga amal qiladi.",
