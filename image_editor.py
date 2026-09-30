@@ -67,6 +67,148 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
 FONT_BOLD = float(os.getenv("FONT_BOLD", "0.028"))
 FONT_UPPER = os.getenv("FONT_UPPER", "1") == "1"
 
+# RENDER_V2 (2026-09-30, faqat @gardenhwa_bot - foydalanuvchi: "cleaning yaxshi emas"):
+# pufakcha BUTUNLAY bitta rang bilan bo'yalmaydi - faqat harflar topilib, atrofidan
+# to'ldiriladi (inpaint). Sabab: gradientli / ichki soyali pufakcha (haqiqiy bobda
+# oq->binafsha) tekis kulrang "yamoq" bo'lib qolardi, soyasi yo'qolardi. Qator oralig'i ham.
+RENDER_V2 = os.getenv("RENDER_V2", "") == "1"
+
+
+def _text_ink(sub: np.ndarray, bg: tuple[int, int, int], thr: int = 35) -> np.ndarray:
+    """Harf piksellari - gradient fonda ham. Fon morfologik "yopish" bilan topiladi
+    (harf chizig'idan keng yadro harfni yo'qotadi, gradient esa qoladi); fon yorug'
+    bo'lsa to'q harf, qorong'i bo'lsa och harf qidiriladi."""
+    import cv2
+
+    gray = cv2.cvtColor(np.ascontiguousarray(sub), cv2.COLOR_RGB2GRAY).astype(np.int16)
+    kernel = np.ones((21, 21), np.uint8)
+    if sum(bg) / 3 > 110:
+        back = cv2.morphologyEx(gray.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(np.int16)
+        return (back - gray) > thr
+    back = cv2.morphologyEx(gray.astype(np.uint8), cv2.MORPH_OPEN, kernel).astype(np.int16)
+    return (gray - back) > thr
+
+
+def _flood_gradient(sub: np.ndarray, tbox: tuple[int, int, int, int],
+                    bg: tuple[int, int, int]) -> np.ndarray | None:
+    """Pufakcha ichini topadi - gradientli pufakchada ham.
+
+    Eski usul bitta rangga yaqin piksellarni olardi: oq->binafsha gradientli pufakchaning
+    faqat YARMI topilib, yarmi tekis bo'yalar, yarmida asl yozuv qolardi (haqiqiy bob,
+    "HE DIED PROTECTING..."). Endi: harflar morfologik yopish bilan olib tashlangan
+    fonda floodFill QO'SHNI piksellar farqi bo'yicha tarqaladi - silliq gradient bo'ylab
+    yuradi, keskin kontur chizig'ida to'xtaydi."""
+    import cv2
+
+    gray = cv2.cvtColor(np.ascontiguousarray(sub), cv2.COLOR_RGB2GRAY)
+    kernel = np.ones((21, 21), np.uint8)
+    op = cv2.MORPH_CLOSE if sum(bg) / 3 > 110 else cv2.MORPH_OPEN
+    closed = cv2.morphologyEx(gray, op, kernel)
+    tx1, ty1, tx2, ty2 = tbox
+    h, w = gray.shape
+    tx1, ty1 = max(0, tx1), max(0, ty1)
+    tx2, ty2 = min(w, tx2), min(h, ty2)
+    if tx2 - tx1 < 2 or ty2 - ty1 < 2:
+        return None
+    # Harflar FAQAT matn qutisi atrofida olib tashlanadi: yopish amali pufakchaning
+    # ingichka konturini ham o'chirardi va tarqalish pufakchadan chiqib ketardi
+    # (haqiqiy bobda kontur yo'qoldi). Tashqarida asl rasm - kontur to'siq bo'lib qoladi.
+    back = gray.copy()
+    zy1, zy2, zx1, zx2 = max(0, ty1 - 8), min(h, ty2 + 8), max(0, tx1 - 10), min(w, tx2 + 10)
+    back[zy1:zy2, zx1:zx2] = closed[zy1:zy2, zx1:zx2]
+    back = cv2.GaussianBlur(back, (5, 5), 0)          # tekstura/JPEG shovqini
+    # urug': matn qutisida fonning eng odatiy (median) qiymatiga yaqin nuqta
+    patch = back[ty1:ty2, tx1:tx2].astype(np.int16)
+    med = np.median(patch)
+    iy, ix = np.unravel_index(np.argmin(np.abs(patch - med)), patch.shape)
+    mask = np.zeros((h + 2, w + 2), np.uint8)
+    cv2.floodFill(back.copy(), mask, (int(tx1 + ix), int(ty1 + iy)), 0, 4, 4,
+                  4 | cv2.FLOODFILL_MASK_ONLY | (255 << 8))
+    region = mask[1:-1, 1:-1] > 0
+    if not region.any():
+        return None
+    # Himoya: pufakcha matndan ~15 barobardan katta bo'lmaydi - kattaroq bo'lsa kontur
+    # uzuq va tarqalish rasmga chiqib ketgan. Unda eski (rang bo'yicha) usul.
+    if region.sum() > 15 * (tx2 - tx1) * (ty2 - ty1):
+        close = np.abs(sub.astype(np.int16) - np.array(bg, np.int16)).max(axis=2) < _COLOR_TOLERANCE
+        return _surrounding_region(close, (tx1, ty1, tx2, ty2))
+    return region
+
+
+def _is_busy(sub: np.ndarray, region: np.ndarray, bg: tuple[int, int, int]) -> bool:
+    """Topilgan "pufakcha" aslida rasmmi: harflarsiz piksellari juda rang-barang.
+    Titul sahifasida logotip ustidagi yozuv pufakcha deb olinib, ko'k to'rtburchak
+    bilan bo'yalgan edi. Oddiy/gradientli pufakcha: 5-95% yorug'lik oralig'i < ~45."""
+    import cv2
+
+    ink = _text_ink(sub, bg, thr=18) | _text_ink(sub, (0, 0, 0) if sum(bg) / 3 > 110 else (255, 255, 255), thr=25)
+    ink = cv2.dilate(ink.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    pix = sub[region & ~ink]
+    if len(pix) < 200:
+        return False
+    lum = pix.astype(np.float32).mean(axis=1)
+    return float(np.percentile(lum, 95) - np.percentile(lum, 5)) > 60
+
+
+def _is_gradient(sub: np.ndarray, fill: np.ndarray, bg: tuple[int, int, int]) -> bool:
+    """Pufakcha foni bir tekis emasmi (gradient, ichki soya). Harfsiz fon rangi
+    tarqoqligi bo'yicha: oq pufakchada ~0-10, oq->binafsha gradientda 30+."""
+    import cv2
+
+    ink = _text_ink(sub, bg, thr=18)
+    ink = cv2.dilate(ink.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    known = (fill & ~ink).astype(np.float32)
+    if known.sum() < 200:
+        return False
+    # Faqat KENG ko'lamli o'zgarish: skanlatsiyadan qolgan ingichka xira chiziq yoki
+    # JPEG shovqini oq pufakchani "gradient" qilib qo'ymasin (haqiqiy bobda shunday bo'ldi,
+    # tekis bo'yash o'rniga iz qolgan edi) - harfsiz fon keng blur bilan o'rtachalanadi.
+    lum = cv2.cvtColor(np.ascontiguousarray(sub), cv2.COLOR_RGB2GRAY).astype(np.float32)
+    d = cv2.GaussianBlur(known, (41, 41), 0)
+    smooth = cv2.GaussianBlur(lum * known, (41, 41), 0) / np.maximum(d, 1e-3)
+    vals = smooth[(fill & ~ink) & (d > 0.5)]
+    if len(vals) < 200:
+        return False
+    return float(np.percentile(vals, 97) - np.percentile(vals, 3)) > 18
+
+
+def _erase_text_smooth(sub: np.ndarray, fill: np.ndarray, tbox: tuple[int, int, int, int],
+                       bg: tuple[int, int, int]) -> None:
+    """Pufakcha ichidagi (fill) va matn qutisi atrofidagi harflarni inpaint bilan o'chiradi."""
+    import cv2
+
+    h, w = fill.shape
+    tx1, ty1, tx2, ty2 = tbox
+    px, py = max(10, int((tx2 - tx1) * 0.06)), 10     # qiya harf / tor OCR qutisi uchun zaxira
+    zone = np.zeros_like(fill)
+    zone[max(0, ty1 - py):min(h, ty2 + py), max(0, tx1 - px):min(w, tx2 + px)] = True
+    zone &= fill
+    # past chegara (18): harf atrofidagi och JPEG "halo" ham olinsin - aks holda dog' qolardi.
+    # Qarama-qarshi yo'nalish ham: harfning oq "nur" konturi (binafsha pufakchada oq iz qolardi)
+    light_bg = sum(bg) / 3 > 110
+    ink = _text_ink(sub, bg, thr=18) | _text_ink(sub, (0, 0, 0) if light_bg else (255, 255, 255), thr=25)
+    mask = (ink & zone).astype(np.uint8)
+    if not mask.any():
+        return
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3).astype(bool) & fill
+    # To'ldirish: harfsiz pufakcha piksellaridan NORMALLASHTIRILGAN blur - gradient silliq
+    # davom etadi. (cv2.inpaint TELEA harf chetidagi kulrangni tortib, dog' qoldirardi.)
+    known = (fill & ~mask).astype(np.float32)
+    img = sub.astype(np.float32)
+    est = np.zeros_like(img)
+    den = np.zeros(known.shape, np.float32)
+    for k in (31, 81):                   # keng harf bloki uchun kattaroq yadro zaxira
+        d = cv2.GaussianBlur(known, (k, k), 0)
+        n = cv2.GaussianBlur(img * known[..., None], (k, k), 0)
+        ok = (den < 1e-3) & (d > 1e-3)
+        est[ok] = n[ok] / d[ok][:, None]
+        den[ok] = d[ok]
+    done = mask & (den > 1e-3)
+    sub[done] = np.clip(est[done], 0, 255).astype(np.uint8)
+    rest = mask & ~done
+    if rest.any():
+        sub[rest] = bg
+
 
 def _bold(font) -> int:
     if "digistrip" not in str(getattr(font, "path", "")).lower():
@@ -223,7 +365,10 @@ def _fill_bubble(arr: np.ndarray, box: tuple[int, int, int, int],
     # piksellar ham oqimtir bo'lgani uchun to'ldirish butun to'rtburchakka
     # yoyilib ketardi. Tarqalish esa qorong'i kontur (pufakcha chizig'i)
     # bilan to'siladi, shuning uchun faqat ichkarida qoladi.
-    region = _surrounding_region(close, (bx1 - x1, by1 - y1, bx2 - x1, by2 - y1))
+    if RENDER_V2:
+        region = _flood_gradient(sub, (bx1 - x1, by1 - y1, bx2 - x1, by2 - y1), bg)
+    else:
+        region = _surrounding_region(close, (bx1 - x1, by1 - y1, bx2 - x1, by2 - y1))
 
     # Tarqalish oynaning 3+ tomoniga yetib borsa - pufakcha chegarasi yo'q
     # (matn rasm yoki bir xil fon ustida). Bu holatni chaqiruvchi inpaint
@@ -237,12 +382,17 @@ def _fill_bubble(arr: np.ndarray, box: tuple[int, int, int, int],
     touched = _touches(region, clipped=(x1 == 0, y1 == 0, x2 == W, y2 == H))
     if touched >= 3:
         return None
+    if RENDER_V2 and _is_busy(sub, region, bg):
+        return None     # bu rasm (logotip, fon tasviri) - pufakcha emas: faqat harf o'chiriladi
 
     # Faqat pufakcha ichi + uning ICHIDA qolgan harflar bo'yaladi. Avval har qator
     # chetdan-chetgacha bo'yalardi - haqiqiy bobda pufakcha konturi va dumi
     # kesilib, tutash pufakchalarda oq to'rtburchak paydo bo'lardi.
     fill = _with_holes(region, clipped=(x1 == 0, y1 == 0, x2 == W, y2 == H))
-    sub[fill] = bg
+    if RENDER_V2 and _is_gradient(sub, fill, bg):
+        _erase_text_smooth(sub, fill, (bx1 - x1, by1 - y1, bx2 - x1, by2 - y1), bg)
+    else:
+        sub[fill] = bg      # tekis pufakcha: bitta rang - eng toza natija (iz qolmaydi)
     shape = (x1, y1, fill)          # pufakcha shakli - matnni shu shaklga moslab yozish uchun
 
     # Matn uchun joy: faqat SHU matn atrofidagi (vertikal tasma) va uning ostidagi
@@ -370,7 +520,11 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
 
 def _line_height(font: ImageFont.FreeTypeFont) -> int:
     box = font.getbbox("Agqy")
-    return (box[3] - box[1]) + 4
+    h = (box[3] - box[1]) + 4
+    if RENDER_V2:
+        # KATTA harf + qalinlik + "O‘" ustidagi belgi: qatorlar bir-biriga tegib qolardi
+        h += 2 * _bold(font) + int(font.size * 0.12)
+    return h
 
 
 def _fit_text(draw: ImageDraw.ImageDraw, text: str, box_w: int, box_h: int,
@@ -552,8 +706,16 @@ def _inpaint_text(arr: np.ndarray, box: tuple[int, int, int, int]) -> tuple[int,
     # Fon: qutining chetidagi piksellar (matn odatda o'rtada)
     ring = np.concatenate([region[0], region[-1], region[:, 0], region[:, -1]])
     bg = np.median(ring, axis=0)
-    diff = np.abs(region.astype(np.int16) - bg.astype(np.int16)).max(axis=2)
-    mask = (diff > 60).astype(np.uint8) * 255
+    if RENDER_V2:
+        # Orqa fonni saqlash: "fondan farq qiladigan hamma narsa" emas, faqat harf
+        # shaklidagi (ingichka, fonga nisbatan keskin) piksellar - to'q harf ham, uning
+        # oq konturi ham. Rasmning keng qismlari (soch, kiyim) tegilmaydi.
+        dark = _text_ink(region, (255, 255, 255), thr=45)
+        light = _text_ink(region, (0, 0, 0), thr=45)
+        mask = (dark | light).astype(np.uint8) * 255
+    else:
+        diff = np.abs(region.astype(np.int16) - bg.astype(np.int16)).max(axis=2)
+        mask = (diff > 60).astype(np.uint8) * 255
     try:
         import cv2
 
@@ -601,6 +763,7 @@ def _draw_sfx_label(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], t
 def render_translation(image_bytes: bytes, translations: list[dict], quality: int = 95) -> bytes:
     image = load_image(image_bytes)
     arr = np.array(image)
+    orig = arr.copy() if RENDER_V2 else None
     W, H = image.width, image.height
 
     heights = sorted(it["line_h"] for it in translations if it.get("line_h"))
@@ -650,7 +813,13 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
             # bilan bo'lmasin (harf teshigi, sahifa cheti, g'ayrioddiy pufakcha)
             # o'chmay qolgan bo'lsa - qolgan siyoh inpaint bilan o'chiriladi.
             # Haqiqiy bobda aynan shu xato ~20 joyda asl yozuvni qoldirgan edi.
-            after = _ink(arr, box, bg_color)
+            if RENDER_V2:
+                # gradient fonda _ink soyani ham "siyoh" deb sanardi - harf detektori bilan
+                bx1, by1, bx2, by2 = box
+                before = int(_text_ink(orig[by1:by2, bx1:bx2], bg_color).sum())
+                after = int(_text_ink(arr[by1:by2, bx1:bx2], bg_color).sum())
+            else:
+                after = _ink(arr, box, bg_color)
             if before and after / before > 0.15:
                 logger.info("Asl yozuv to'liq o'chmadi (%.0f%% qoldi) - qayta o'chirilmoqda",
                             100 * after / before)
@@ -698,7 +867,10 @@ def _erase_ink(arr: np.ndarray, box: tuple[int, int, int, int], bg: tuple[int, i
     """Matn qutisida qolgan siyohni o'chiradi: avval inpaint, bo'lmasa fon rangi bilan."""
     x1, y1, x2, y2 = box
     sub = arr[y1:y2, x1:x2]
-    ink = (np.abs(sub.astype(np.int16) - np.array(bg, np.int16)).max(axis=2) > 60)
+    if RENDER_V2:
+        ink = _text_ink(sub, bg)          # gradient/soya o'chirilmasin - faqat harf
+    else:
+        ink = (np.abs(sub.astype(np.int16) - np.array(bg, np.int16)).max(axis=2) > 60)
     if not ink.any():
         return
     try:

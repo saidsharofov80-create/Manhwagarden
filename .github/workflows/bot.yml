@@ -38,6 +38,8 @@ jobs:
           GATE_URL: https://manhwa-gate.compass-crm.workers.dev
           ADMINS_URL: https://manhwa-gate.compass-crm.workers.dev/admins
           OCR_ENGINE: fast
+          # Tozalash v2: orqa fon (gradient, soya, rasm) saqlanadi - faqat shu bot
+          RENDER_V2: "1"
           # Tarjimani Gemini tahrirlaydi (faqat shu bot - foydalanuvchi talabi)
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
