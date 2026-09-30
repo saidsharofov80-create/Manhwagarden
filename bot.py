@@ -1,4 +1,5 @@
 import asyncio
+import html
 import io
 import logging
 import os
@@ -6,7 +7,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
@@ -77,6 +78,9 @@ _job_counter = {"n": 0}
 _ai_semaphore = asyncio.Semaphore(1)
 
 
+MENU_BUTTON = "🏠 Menyu"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     context.user_data.pop("await_rule", None)
@@ -88,51 +92,98 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await _ask_owner_to_allow(context, update.effective_user)
         return
-    text = (
-        "Assalomu alaykum!\n\n"
-        "Menga yuboring:\n"
-        "• manhwa sahifasi RASMINI (yaxshisi 'fayl' sifatida — sifat yo'qolmaydi)\n"
-        f"• yoki PDF bobni (bir martada {MAX_PDF_PAGES} sahifagacha) — BITTA PDF bo'lib qaytadi\n\n"
-        "Bir nechta fayl yuborsangiz, navbat bilan birma-bir tarjima qilinadi.\n"
-        "Odatda bitta bob 1.5-3 daqiqada tayyor bo'ladi.\n\n"
-        "Buyruqlar:\n"
-        "/holat — bot va AI tayyormi, tekshirish\n"
-        "/navbat — navbatdagi ishlar (o'zingiznikini bekor qilish mumkin)\n"
-        "/id — Telegram ID'ingizni ko'rish\n"
-        "/qoida — AI'ga tarjima ko'rsatmalari (masalan: /qoida xotinim = rafiqam)"
-    )
-    if admins.is_superadmin(user_id):
-        text += (
-            "\n\n👑 Siz SUPER ADMINsiz:\n"
-            "/admins — adminlar ro'yxati, o'chirish tugmalari\n"
-            "/addadmin <id> — admin qo'shish (yoki odamning xabarini menga forward qiling)\n"
-            "/removeadmin <id> — adminni o'chirish\n"
-            "/navbat — istalgan ishni bekor qila olasiz"
-        )
-    await update.effective_message.reply_text(text, reply_markup=_menu(user_id))
+    # Pastdagi doimiy tugma - menyu yo'qolib ketsa ham bir bosishda qaytadi
+    await update.effective_message.reply_text(
+        "Assalomu alaykum! 👋",
+        reply_markup=ReplyKeyboardMarkup([[MENU_BUTTON]], resize_keyboard=True))
+    text, markup = _screen("main", user_id)
+    await update.effective_message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 
-def _menu(user_id: int) -> InlineKeyboardMarkup:
-    """/start ostidagi tugmalar (buyruqlarni yodlab yurmaslik uchun)."""
-    rows = [
-        [InlineKeyboardButton("📊 Holat", callback_data="menu:holat"),
-         InlineKeyboardButton("📋 Navbat", callback_data="menu:navbat")],
-        [InlineKeyboardButton("📝 Qoidalar", callback_data="menu:qoidalar"),
-         InlineKeyboardButton("➕ Qoida qo'shish", callback_data="menu:qoida")],
-        [InlineKeyboardButton("🆔 Mening ID", callback_data="menu:id")],
-    ]
+def _btn(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text, callback_data=data)
+
+
+def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Bo'limli menyu: har bo'lim bitta xabar ichida almashadi (m:<bo'lim>)."""
+    back = [_btn("⬅️ Orqaga", "m:main")]
+    if name == "tarjima":
+        return ((
+            "🌐 <b>Tarjima</b>\n\n"
+            "<b>Qanday ishlaydi:</b>\n"
+            "1️⃣ Manhwa sahifasi RASMINI yoki PDF bobni yuboring\n"
+            "2️⃣ Bot matnni o'qiydi, AI o'zbekchaga tarjima qiladi\n"
+            "3️⃣ Tarjimali rasm / BITTA PDF qaytadi\n\n"
+            f"• PDF: bir martada {MAX_PDF_PAGES} sahifagacha\n"
+            "• Rasmni 'fayl' sifatida yuborsangiz sifat yo'qolmaydi\n"
+            "• Bir nechta fayl - navbat bilan birma-bir\n"
+            "• Bitta bob odatda 1.5-3 daqiqa"),
+            InlineKeyboardMarkup([[_btn("📋 Navbatni ko'rish", "m:do:navbat")], back]))
+    if name == "qoidalar":
+        rules = admins.list_rules()
+        body = "\n".join(f"{i}. {html.escape(r)}" for i, r in enumerate(rules, 1)) or "<i>Hozircha qoida yo'q.</i>"
+        rows = [[_btn(f"🗑 {i}-qoidani o'chirish", f"rdel:{i}")] for i in range(1, len(rules) + 1)]
+        rows += [[_btn("➕ Qoida qo'shish", "m:do:qoida")], back]
+        return ((
+            "📝 <b>Tarjima qoidalari</b>\n"
+            "AI tarjima qilganda shularga amal qiladi.\n\n" + body + "\n\n"
+            "<i>«xotinim = rafiqam» shakli AI ishlamay qolsa ham majburan almashtiriladi.</i>"),
+            InlineKeyboardMarkup(rows))
+    if name == "holat":
+        return ("⚙️ <b>Holat</b>\n\nKerakli bo'limni tanlang:",
+                InlineKeyboardMarkup([[_btn("📊 Bot holati", "m:do:holat"),
+                                       _btn("📋 Navbat", "m:do:navbat")],
+                                      [_btn("🆔 Mening ID", "m:do:id")], back]))
+    if name == "admins" and admins.is_superadmin(user_id):
+        return ((
+            "👑 <b>Adminlar</b>\n\n"
+            "• Yangi admin: o'sha odamning xabarini menga forward qiling "
+            "yoki u /start bossin - sizga tugmali so'rov keladi\n"
+            "• Ro'yxatda har admin yonida o'chirish tugmasi bor"),
+            InlineKeyboardMarkup([[_btn("👥 Adminlar ro'yxati", "m:do:admins")], back]))
+    if name == "yordam":
+        text = (
+            "ℹ️ <b>Yordam - buyruqlar</b>\n\n"
+            "/start - menyu\n"
+            "/holat - bot va AI tayyormi\n"
+            "/navbat - navbatdagi ishlar (o'zingiznikini bekor qilish mumkin)\n"
+            "/qoida &lt;matn&gt; - AI'ga tarjima qoidasi qo'shish\n"
+            "/qoidaochir &lt;raqam&gt; - qoidani o'chirish\n"
+            "/id - Telegram ID'ingiz")
+        if admins.is_superadmin(user_id):
+            text += ("\n\n👑 <b>Super admin:</b>\n/admins - adminlar ro'yxati\n"
+                     "/addadmin &lt;id&gt; - admin qo'shish\n/removeadmin &lt;id&gt; - adminni o'chirish")
+        return text, InlineKeyboardMarkup([back])
+    rows = [[_btn("🌐 Tarjima", "m:tarjima"), _btn("📝 Qoidalar", "m:qoidalar")],
+            [_btn("⚙️ Holat", "m:holat"), _btn("ℹ️ Yordam", "m:yordam")]]
     if admins.is_superadmin(user_id):
-        rows.append([InlineKeyboardButton("👑 Adminlar", callback_data="menu:admins")])
-    return InlineKeyboardMarkup(rows)
+        rows.append([_btn("👑 Adminlar", "m:admins")])
+    return ((
+        "📚 Bu bot manhwa sahifalarini <b>o'zbek tiliga tarjima</b> qiladi.\n\n"
+        "Rasm yoki PDF yuboring - yoki quyidagi bo'limlardan birini tanlang:"),
+        InlineKeyboardMarkup(rows))
+
+
+async def _show(update: Update, name: str) -> None:
+    """Bo'limni o'sha xabarning o'zida ochadi (yangi xabar yubormasdan)."""
+    text, markup = _screen(name, update.effective_user.id)
+    try:
+        await update.callback_query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+    except TelegramError:              # "message is not modified" va h.k.
+        pass
 
 
 async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    what = query.data.split(":", 1)[1]
+    if not admins.is_allowed(update.effective_user.id):
+        return
+    parts = query.data.split(":")
+    if parts[1] != "do":
+        await _show(update, parts[1])
+        return
+    what = parts[2]
     if what == "qoida":
-        if not admins.is_allowed(update.effective_user.id):
-            return
         context.user_data["await_rule"] = True
         await update.effective_message.reply_text(
             "✍️ Qoidani yozib yuboring. Masalan:\n"
@@ -140,10 +191,16 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "• Duke'ni doim gersog deb tarjima qil\n\n"
             "Bekor qilish: /start")
         return
-    handler = {"holat": status_cmd, "navbat": queue_cmd, "qoidalar": rules_cmd,
-               "id": my_id, "admins": list_admins_cmd}.get(what)
+    handler = {"holat": status_cmd, "navbat": queue_cmd, "id": my_id,
+               "admins": list_admins_cmd}.get(what)
     if handler:
         await handler(update, context)
+
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("await_rule", None)
+    text, markup = _screen("main", update.effective_user.id)
+    await update.effective_message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 
 async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -427,21 +484,22 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(f"🗑 {i}-qoidani o'chirish", callback_data=f"rdel:{i}")]
              for i in range(1, len(rules) + 1)]
-            + [[InlineKeyboardButton("➕ Qoida qo'shish", callback_data="menu:qoida")]]))
+            + [[InlineKeyboardButton("➕ Qoida qo'shish", callback_data="m:do:qoida")]]))
 
 
 async def on_rule_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     if not admins.is_allowed(update.effective_user.id):
+        await query.answer()
         return
     gone = admins.remove_rule(int(query.data.split(":", 1)[1]))
     if gone is None:
-        await update.effective_message.reply_text("Bu qoida allaqachon o'chirilgan. Ro'yxat: /qoida")
+        await query.answer("Bu qoida allaqachon o'chirilgan")
+        await _show(update, "qoidalar")
         return
     uz_translate._cache.clear()
-    await update.effective_message.reply_text(f"🗑 O'chirildi: {gone}")
-    await rules_cmd(update, context)
+    await query.answer(f"O'chirildi: {gone}"[:190])
+    await _show(update, "qoidalar")
 
 
 async def remove_rule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -851,11 +909,15 @@ async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if await add_by_forward(update, context):
         return
 
+    if msg.text == MENU_BUTTON and admins.is_allowed(user_id):
+        await show_menu(update, context)
+        return
     if msg.text and context.user_data.pop("await_rule", False) and admins.is_allowed(user_id):
         n = admins.add_rule(msg.text.strip()[:300])
         uz_translate._cache.clear()
         await msg.reply_text(f"✅ {n}-qoida qo'shildi. Keyingi boblardan boshlab AI shunga amal qiladi.",
-                             reply_markup=_menu(user_id))
+                             reply_markup=InlineKeyboardMarkup([[_btn("📝 Qoidalar", "m:qoidalar"),
+                                                                 _btn("🏠 Menyu", "m:main")]]))
         return
 
     if not admins.is_allowed(user_id):
@@ -911,6 +973,7 @@ def _build_app(token: str) -> Application:
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CommandHandler("id", my_id))
     app.add_handler(CommandHandler("holat", status_cmd))
     app.add_handler(CommandHandler("navbat", queue_cmd))
@@ -925,7 +988,7 @@ def _build_app(token: str) -> Application:
     # Qolgan hamma narsa (buyruqlardan tashqari) - jim qolmaslik uchun
     app.add_handler(MessageHandler(~filters.COMMAND, handle_other))
     app.add_handler(CallbackQueryHandler(on_queue_button, pattern=r"^qcancel:"))
-    app.add_handler(CallbackQueryHandler(on_menu_button, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(on_menu_button, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(on_rule_delete, pattern=r"^rdel:\d+$"))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^(allow|deny|remove):"))
     app.add_error_handler(on_error)
