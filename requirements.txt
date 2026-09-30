@@ -9,3 +9,7 @@ pypdfium2>=5.0
 rapidocr>=3.9
 onnxruntime>=1.24
 wordninja>=2.0
+
+# 20 MB dan katta fayllar (bigfile.py, MTProto) - faqat TG_API_ID/TG_API_HASH bo'lsa ishlatiladi
+pyrofork>=2.3.60
+tgcrypto-pyrofork>=1.2.8

@@ -20,6 +20,7 @@ from telegram.ext import (
 )
 
 import admins
+import bigfile
 import pdf_utils
 import uz_translate
 from config import BASE_DIR, BOT_SUFFIX, BOT_TOKEN, OWNER_ID
@@ -600,10 +601,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Fayl sifatida katta bo'lsa - navbatga qo'ymasdan darhol aytamiz
     photo = msg.photo[-1] if msg.photo else msg.document
-    if getattr(photo, "file_size", None) and photo.file_size > MAX_DOWNLOAD_BYTES:
+    size = getattr(photo, "file_size", None) or 0
+    if size > MAX_DOWNLOAD_BYTES and not (bigfile.enabled() and size <= bigfile.MAX_BIG_BYTES):
+        limit = bigfile.MAX_BIG_BYTES // 2**20 if bigfile.enabled() else 20
         await msg.reply_text(
-            "Bu fayl juda katta (20 MB dan oshadi) — Telegram bot buni yuklab "
-            "ololmaydi. Iltimos, kichikroq qilib (yoki bobni bo'lib) qayta yuboring."
+            f"Bu fayl juda katta ({size / 2**20:.0f} MB, chegara {limit} MB). "
+            "Iltimos, bobni bo'lib (yoki siqib) qayta yuboring."
         )
         return
 
@@ -1065,17 +1068,22 @@ async def _process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, sta
         if photo is None and update.message.document:
             photo = update.message.document
 
-        if getattr(photo, "file_size", None) and photo.file_size > MAX_DOWNLOAD_BYTES:
-            await status_msg.edit_text(
-                "Bu fayl juda katta (20 MB dan oshadi) — Telegram bot buni yuklab "
-                "ololmaydi. Iltimos, rasmni siqib yoki kichikroq holda qayta yuboring."
-            )
-            return
-
-        tg_file = await photo.get_file()
-        buf = io.BytesIO()
-        await tg_file.download_to_memory(out=buf)
-        file_bytes = buf.getvalue()
+        size = getattr(photo, "file_size", None) or 0
+        if size > MAX_DOWNLOAD_BYTES:
+            if not bigfile.enabled():
+                await status_msg.edit_text(
+                    "Bu fayl juda katta (20 MB dan oshadi) — Telegram bot buni yuklab "
+                    "ololmaydi. Iltimos, rasmni siqib yoki kichikroq holda qayta yuboring."
+                )
+                return
+            # 20 MB dan katta: MTProto orqali (bigfile.py) - 300 MB gacha
+            await _edit_status(status_msg, f"Katta fayl ({size / 2**20:.0f} MB) yuklab olinmoqda...")
+            file_bytes = await bigfile.download(photo.file_id, BOT_TOKEN)
+        else:
+            tg_file = await photo.get_file()
+            buf = io.BytesIO()
+            await tg_file.download_to_memory(out=buf)
+            file_bytes = buf.getvalue()
         logger.info("Fayl yuklandi: %.0f KB", len(file_bytes) / 1024)
 
         # PDF bo'lsa - har bir sahifa alohida tarjima qilinadi
