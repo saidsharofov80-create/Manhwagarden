@@ -52,10 +52,21 @@ def _engine(kind: str):
             "Global.use_cls": False,
             "Det.limit_side_len": 1024,
         }
-        # Telefonda (2 kuchli + 6 sekin yadro) oqimlar sonini qo'lda berish foydali
-        threads = int(os.getenv("OCR_THREADS", "-1"))
+        # Standart 1: parallellik BO'LAKLAR bo'yicha (translator.FAST_WORKERS). Har
+        # sessiya ham barcha yadrolarni olsa, oqimlar bir-biriga xalaqit beradi.
+        # O'lchov (2 yadro, 8 sahifa): 2 bo'lak x 1 oqim = 33 s; 2 x 2 = 63 s; 1 x 2 = 117 s.
+        threads = int(os.getenv("OCR_THREADS", "1"))
         if threads > 0:
             params["EngineConfig.onnxruntime.intra_op_num_threads"] = threads
+        # Detektor: PP-OCRv4 mobile. O'lchov (2026-09-30, 512x838 bo'lak): standart
+        # model 535 ms, v4 mobile 164 ms (3.3x tez), v5 mobile 251 ms. Detektor OCR
+        # vaqtining ~75% ini olardi. DET_MODEL=default bilan eskisiga qaytadi.
+        det = os.getenv("DET_MODEL", "v4").lower()
+        if det in ("v4", "v5"):
+            params.update({
+                "Det.ocr_version": OCRVersion.PPOCRV4 if det == "v4" else OCRVersion.PPOCRV5,
+                "Det.model_type": ModelType.MOBILE,
+            })
         if kind == "korean":
             params.update({
                 "Rec.lang_type": LangRec.KOREAN,

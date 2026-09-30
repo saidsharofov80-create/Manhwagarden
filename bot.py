@@ -22,7 +22,7 @@ import admins
 import pdf_utils
 from config import BASE_DIR, BOT_SUFFIX, BOT_TOKEN, OWNER_ID
 from image_editor import render_translation
-from translator import TranslationError, translate_page
+from translator import TranslationError, finish_page, read_page, translate_page
 
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -544,21 +544,33 @@ async def _process_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE,
     failed: list[int] = []
     texts = 0
     t0 = time.time()
+    # KONVEYER: sahifa N o'qilayotganda (OCR - barcha yadrolar) N-1 sahifaning
+    # tarjimasi (Google - tarmoqni kutish) va chizilishi fonda ketadi. Avval hammasi
+    # ketma-ket edi: 21 sahifalik bobda tarjima 34 s, chizish 24 s OCR'ga qo'shilardi.
+    async def finish(jpeg: bytes, read: list[dict]) -> tuple[bytes, int]:
+        items = await asyncio.to_thread(finish_page, read) if read else []
+        if not items:
+            return jpeg, 0                    # matnsiz sahifa - aslicha (PDF to'liq bo'lsin)
+        return await asyncio.to_thread(render_translation, jpeg, items, PDF_JPEG_QUALITY), len(items)
+
+    pending: list[asyncio.Task] = []
     for num, _total, jpeg in pages:
         elapsed = int(time.time() - t0)
         await _edit_status(status_msg, f"Tarjima qilinmoqda: {num}/{limit}-sahifa "
                                        f"({elapsed // 60}:{elapsed % 60:02d} o'tdi)")
         try:
             async with _ai_semaphore:
-                items = await asyncio.to_thread(translate_page, jpeg, "image/jpeg", budget)
+                read = await asyncio.to_thread(read_page, jpeg, "image/jpeg", budget)
         except TranslationError as exc:
             logger.warning("PDF %d-sahifa tarjima bo'lmadi: %s", num, exc)
-            items, failed = [], failed + [num]
-        if items:
-            out_pages.append(await asyncio.to_thread(render_translation, jpeg, items, PDF_JPEG_QUALITY))
-            texts += len(items)
-        else:
-            out_pages.append(jpeg)            # matnsiz sahifa - aslicha (PDF to'liq bo'lsin)
+            read, failed = [], failed + [num]
+        pending.append(asyncio.create_task(finish(jpeg, read)))
+        # Xotira to'lmasin: fonda ko'pi bilan 3 ta sahifa
+        while sum(not t.done() for t in pending) > 3:
+            await asyncio.wait([t for t in pending if not t.done()], return_when=asyncio.FIRST_COMPLETED)
+    for page_bytes, n in await asyncio.gather(*pending):
+        out_pages.append(page_bytes)
+        texts += n
 
     await _edit_status(status_msg, "PDF yig'ilmoqda...")
     fitted, size_note = await asyncio.to_thread(pdf_utils.fit_size, out_pages)

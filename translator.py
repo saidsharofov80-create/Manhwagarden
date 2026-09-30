@@ -180,7 +180,9 @@ _used: dict[str, int] = {}
 # kesilgan qator qo'shni bo'lakda albatta to'liq bor.
 FAST_TILE_H = 1800
 FAST_OVERLAP = 300
-FAST_WORKERS = int(os.getenv("FAST_WORKERS", "3"))  # parallel bo'laklar (4 da deyarli farq yo'q)
+# Parallel bo'laklar: har biri 1 oqimli OCR (fast_ocr.OCR_THREADS), shuning uchun
+# yadrolar soniga teng - 2 yadroli GitHub mashinasida 2, noutbukda 6 gacha.
+FAST_WORKERS = int(os.getenv("FAST_WORKERS", str(max(2, min(os.cpu_count() or 2, 6)))))
 
 
 def _auto_reader(tile, budget: dict | None = None) -> list[dict]:
@@ -319,6 +321,23 @@ def _read(image, reader) -> list[dict]:
 
 def translate_page(image_bytes: bytes, media_type: str = "image/jpeg",
                    budget: dict | None = None) -> list[dict]:
+    """Rasmdagi matnlarni topib, o'zbekchaga tarjima qiladi (read_page + finish_page)."""
+    return finish_page(read_page(image_bytes, media_type, budget))
+
+
+def finish_page(result: list[dict]) -> list[dict]:
+    """O'qilgan matnlarni tarjima qiladi. Tarmoqni kutadi, CPU'ni deyarli ishlatmaydi -
+    shuning uchun bot uni keyingi sahifa OCR'i bilan PARALLEL bajaradi."""
+    from uz_translate import translate_items
+
+    translate_items(result)
+    for item in result:
+        item.pop("score", None)
+    return [item for item in result if (item.get("uzbek") or "").strip()]
+
+
+def read_page(image_bytes: bytes, media_type: str = "image/jpeg",
+              budget: dict | None = None) -> list[dict]:
     """Rasmdagi matnlarni topib, tabiiy o'zbekchaga tarjima qiladi.
 
     OCR_ENGINE (muhit o'zgaruvchisi):
@@ -349,14 +368,7 @@ def translate_page(image_bytes: bytes, media_type: str = "image/jpeg",
         result = [it for it in result if it not in dropped]
     _refine_bboxes(image, result)
     logger.info("O'qish (%s): %d ta matn, %.1f sek", engine_used, len(result), time.time() - t0)
-
-    # Tarjima alohida bosqich (modelning o'zbekchasi ishonchsiz)
-    from uz_translate import translate_items
-
-    translate_items(result)
-    for item in result:
-        item.pop("score", None)
-    return [item for item in result if (item.get("uzbek") or "").strip()]
+    return result
 
 
 _WATERMARK = re.compile(

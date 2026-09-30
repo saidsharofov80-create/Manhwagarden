@@ -33,6 +33,5 @@ jobs:
           GATE_URL: https://manhwa-gate.compass-crm.workers.dev
           ADMINS_URL: https://manhwa-gate.compass-crm.workers.dev/admins
           OCR_ENGINE: fast
-          FAST_WORKERS: "3"
           BOT_SLOT: "1"
         run: .venv/bin/python runner.py
