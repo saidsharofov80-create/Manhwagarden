@@ -363,6 +363,16 @@ def read_page(image_bytes: bytes, media_type: str = "image/jpeg",
     # Skanlatsiya suv belgilari/reklama tarjima qilinmaydi va tegilmaydi
     # (haqiqiy bobda "ASURASCANS.COM" "tarjima" qilinib, ustiga dog' tushgan edi)
     dropped = [it for it in result if _is_watermark(it.get("original", ""))]
+    _learn_watermarks(dropped)
+    # Qiya suv belgisi yarim o'qiladi ("DEMONICSCANS" -> "DEMO SGAW") - bobda avval
+    # ko'rilgan guruh nomining bo'lagi bo'lsa ham tashlanadi
+    dropped += [it for it in result if it not in dropped and _is_known_mark(it.get("original", ""))]
+    # Skanlatsiya titrlari sahifasi (STAFF, TL, PROOFREADER, QC...) - 2+ ta rol bo'lsa
+    roles = [it for it in result if it not in dropped and _CREDIT_ROLE.fullmatch(
+        re.sub(r"[^A-Za-z ]+", "", it.get("original", "")).strip())]
+    if len(roles) >= 2:
+        dropped += roles
+    dropped += [it for it in result if it not in dropped and _KO_CREDIT.search(it.get("original", ""))]
     if dropped:
         logger.info("Suv belgisi o'tkazildi: %s", [it["original"][:40] for it in dropped])
         result = [it for it in result if it not in dropped]
@@ -383,7 +393,42 @@ _WATERMARK = re.compile(
 def _is_watermark(text: str) -> bool:
     """Skanlatsiya guruhi nomi, sayt manzili, reklama - tarjima qilinmaydi."""
     t = re.sub(r"\s+", " ", text or "").strip()
-    return bool(t) and bool(_WATERMARK.search(t))
+    return bool(t) and bool(_WATERMARK.search(t) or _PROMO.search(t))
+
+
+# Reklama/titr jumlalari ("HELP US WITH DONATIONS", "WE ARE RECRUITING")
+_PROMO = re.compile(r"donat(e|ion)|recruit|consider\s+(support|donat)|support\s+us\b", re.IGNORECASE)
+_CREDIT_ROLE = re.compile(
+    r"(?i)(staff|credits?|tlc?|rd|ed|pr|ts|qc|cl|rp|translator|translation|proofreader|proofreading"
+    r"|redrawer|redraw(ing)?|cleaner|cleaning|typesetter|typesetting|editor|quality checker"
+    r"|raw provider|raws?|scanlator|scanlation)")
+# Koreyscha sarlavha titri: "글:정선을 그림:구백" (글 = muallif, 그림 = rassom)
+_KO_CREDIT = re.compile(r"(글|그림|원작|각색)\s*[:·]")
+_marks: set[str] = set()     # shu jarayonda ko'rilgan guruh nomlari (demonicscans, ...)
+
+
+def _learn_watermarks(items: list[dict]) -> None:
+    for it in items:
+        for m in re.finditer(r"([a-z]{4,})scans?\b", re.sub(r"[^a-z. ]", "", it.get("original", "").lower())):
+            _marks.add(m.group(1) + "scans")
+    if len(_marks) > 50:
+        _marks.clear()
+
+
+def _is_known_mark(text: str) -> bool:
+    """Qisqa, 1-2 so'zli matn birinchi so'zi ko'rilgan guruh nomining bo'lagimi."""
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    if not words or len(words) > 2 or len(words[0]) < 4:
+        return False
+    if not any(words[0] in m for m in _marks):
+        return False
+    # "DEMON!" haqiqiy gap bo'lishi mumkin - faqat buzuq (lug'atda yo'q) so'z bo'lsa suv belgisi
+    try:
+        import wordninja
+        known = wordninja.DEFAULT_LANGUAGE_MODEL._wordcost
+    except Exception:
+        return False
+    return any(w not in known for w in words)
 
 
 def _refine_bboxes(image, items: list[dict]) -> None:

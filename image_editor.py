@@ -222,6 +222,53 @@ def _dominant_color(region: Image.Image) -> tuple[int, int, int]:
     return colors.most_common(1)[0][0]
 
 
+def _bg_around(arr: np.ndarray, box: tuple[int, int, int, int],
+               line_h: float | None) -> tuple[int, int, int] | None:
+    """Fon rangi matn qutisi ATROFIDAGI halqadan (qutining o'zidan emas).
+
+    Katta yozuvda qutini harflar to'ldiradi: "DIANA DE VERECCIA." (jigarrang harf,
+    oq ramka) da quti ichidagi eng ko'p rang harf rangi chiqib, ramka ichi
+    jigarrangga bo'yalgan edi. Halqa esa asosan fondan iborat.
+    """
+    H, W = arr.shape[:2]
+    x1, y1, x2, y2 = box
+    p = int(max(6, min(24, (line_h or (y2 - y1)) * 0.25)))
+    X1, Y1, X2, Y2 = max(0, x1 - p), max(0, y1 - p), min(W, x2 + p), min(H, y2 + p)
+    sub = arr[Y1:Y2, X1:X2]
+    mask = np.ones(sub.shape[:2], bool)
+    mask[y1 - Y1:y2 - Y1, x1 - X1:x2 - X1] = False
+    ring = sub[mask]
+    if ring.shape[0] < 20:
+        return None
+    q = (ring // 16).astype(np.int32)
+    keys = q[:, 0] * 256 + q[:, 1] * 16 + q[:, 2]
+    vals, counts = np.unique(keys, return_counts=True)
+    best = vals[counts.argmax()]
+    if counts.max() < 0.35 * ring.shape[0]:
+        return None                    # halqa bir xil rangda emas (rasm) - eski usul
+    pick = ring[keys == best]
+    return tuple(int(v) for v in np.median(pick, axis=0))
+
+
+def _ink_color(arr: np.ndarray, box: tuple[int, int, int, int],
+               bg: tuple[int, int, int]) -> tuple[int, int, int] | None:
+    """Asl yozuv RANGLI bo'lsa (jigarrang, qizil, ko'k) - o'sha rang; qora/oq bo'lsa None.
+
+    Foydalanuvchi: tozalash "yaxshi emas" - rangli ramka yozuvi tarjimada qora chiqardi.
+    """
+    x1, y1, x2, y2 = box
+    sub = arr[y1:y2, x1:x2].reshape(-1, 3).astype(np.int16)
+    if sub.shape[0] == 0:
+        return None
+    far = np.abs(sub - np.array(bg, np.int16)).max(axis=1) > 90
+    if far.sum() < 30:
+        return None
+    ink = np.median(sub[far], axis=0)
+    if int(ink.max() - ink.min()) < 50:
+        return None                     # kulrang/qora/oq - odatiy rang qoladi
+    return tuple(int(v) for v in ink)
+
+
 def _text_color_for(bg: tuple[int, int, int]) -> tuple[int, int, int]:
     brightness = (bg[0] * 299 + bg[1] * 587 + bg[2] * 114) / 1000
     return (20, 20, 20) if brightness > 140 else (245, 245, 245)
@@ -803,6 +850,10 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
             continue
 
         bg_color = _dominant_color(image.crop(box))
+        ink_color = None
+        if RENDER_V2:
+            bg_color = _bg_around(arr, box, line_h) or bg_color
+            ink_color = _ink_color(arr, box, bg_color)
         before = _ink(arr, box, bg_color)
         filled = _fill_bubble(arr, box, bg_color)
         if filled is not None:
@@ -824,7 +875,8 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
                 logger.info("Asl yozuv to'liq o'chmadi (%.0f%% qoldi) - qayta o'chirilmoqda",
                             100 * after / before)
                 _erase_ink(arr, box, bg_color)
-            jobs.append(("bubble", inner, bg_color, uzbek_text, max_size, shape, box, upper))
+            jobs.append(("bubble", inner, bg_color, uzbek_text, max_size, shape, box, upper,
+                         ink_color))
         else:
             area = _inpaint_text(arr, box)
             jobs.append(("art", area, None, uzbek_text, max_size))
@@ -837,7 +889,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
     for job in jobs:
         mode, box, bg_color, text, extra = job[:5]
         if mode == "bubble":
-            color = _text_color_for(bg_color)
+            color = job[8] or _text_color_for(bg_color)
             shape, tbox = job[5], job[6]
             if shape is None or not _draw_in_shape(draw, shape, tbox, text, color, extra):
                 _draw_block(draw, box, text, color, max_size=extra)
@@ -910,7 +962,7 @@ def _merge_same_bubble(jobs: list) -> list:
                     tb = (min(prev[6][0], job[6][0]), min(prev[6][1], job[6][1]),
                           max(prev[6][2], job[6][2]), max(prev[6][3], job[6][3]))
                     out[k] = ("bubble", prev[1], prev[2], prev[3] + " " + job[3],
-                              min(sizes) if sizes else None, prev[5], tb, prev[7])
+                              min(sizes) if sizes else None, prev[5], tb, prev[7], prev[8])
                     break
             else:
                 out.append(job)

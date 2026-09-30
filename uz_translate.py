@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -465,8 +466,11 @@ LLM_TIMEOUT = 90
 # serverlar band, 503 ham beradi - keyingi model, so'ng Google).
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODELS = [m for m in os.getenv(
-    "GEMINI_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m]
-GEMINI_TIMEOUT = 45
+    "GEMINI_MODELS",
+    # "model:fikrlash". 3.5-flash (lite emas) haqiqiy bobda jonliroq: "What are you talking
+    # about?" -> lite "nima derkan-bu?", flash "Nimalar deyapsan?"; ~11 s/sahifa (fonda).
+    "gemini-3.5-flash:low,gemini-3.5-flash-lite:minimal,gemini-3.1-flash-lite:minimal").split(",") if m]
+GEMINI_TIMEOUT = 35
 _GEMINI_SYSTEM = """You are a professional manhwa (Korean webcomic) translator into Uzbek.
 Translate each speech bubble into natural, lively, CONVERSATIONAL Uzbek (Latin script, use o' and g').
 Rules:
@@ -477,33 +481,65 @@ Rules:
 - Keep character and place names unchanged (only fix OCR typos in them).
 - Honorifics: "my lord" = "hazratim", "young master" = "yosh xo'jayin", "big brother/hyung" = "aka", "noona/big sister" = "opa", "butler" = "xizmatkor", "duke" = "gersog".
 - Keep ending punctuation (!, ?, ?!, ...) and stutter (C-clear -> Y-yo'l). Sound effects -> Uzbek onomatopoeia.
+- Never reorder or translate full names ("Diana de Vereccia" stays "Diana de Vereccia"); titles: marquis = markiz, count = graf, baron = baron, fiancee = qallig'im, fiance = kuyovim (one word, no extra words).
+- A line may start mid-sentence (continuing the previous bubble, e.g. "...and also, my fiancee."): keep it as a continuation, do not capitalize it into a new idea.
+- Keep the speaker's register consistent: servants and subordinates use "siz" and polite forms; close friends and rivals may use "sen".
+- Write o' and g' correctly (o'zgargan, not ozgargan); no Russian or English words unless they are names.
 Return ONLY a JSON array of strings: exactly one Uzbek string per input line, same order."""
+
+
+_ctx: list[str] = []          # oldingi sahifa(lar)ning oxirgi gaplari - Gemini uchun kontekst
+
+
+def _parse_list(text: str) -> list | None:
+    """Gemini javobidan JSON massivni ajratadi (```json ... ``` o'rami, oxiridagi izoh bo'lsa ham)."""
+    text = text.strip()
+    i = text.find("[")
+    if i < 0:
+        return None
+    try:
+        out, _ = json.JSONDecoder().raw_decode(text[i:])
+    except ValueError:
+        return None
+    if isinstance(out, list) and out and all(isinstance(x, list) and x for x in out):
+        out = [x[-1] for x in out]           # [[en, uz], ...] qaytarib yuborsa
+    return out if isinstance(out, list) else None
 
 
 def _gemini(english: list[str], drafts: list[str]) -> list[str] | None:
     user = ("Each item is [English source, rough machine translation]. The machine translation is "
             "usually accurate but stiff and literal. Write the final natural Uzbek line:\n"
             + json.dumps([[e, d] for e, d in zip(english, drafts)], ensure_ascii=False))
-    body = json.dumps({
-        "systemInstruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
-        "contents": [{"role": "user", "parts": [{"text": user}]}],
-        "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json",
-                             "thinkingConfig": {"thinkingLevel": "minimal"}},
-    }).encode("utf-8")
-    for model in GEMINI_MODELS:
-        req = urllib.request.Request(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            data=body, headers={"x-goog-api-key": GEMINI_KEY, "content-type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as r:
-                data = json.loads(r.read().decode("utf-8"))
-            text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
-            out = json.loads(text)
-            if isinstance(out, list) and len(out) == len(english):
-                return [str(s or "") for s in out]
-            logger.info("Gemini %s: javob uzunligi mos emas", model)
-        except Exception as exc:
-            logger.info("Gemini %s ishlamadi (%s)", model, str(exc)[:120])
+    if _ctx:
+        user = ("Previous bubbles of this chapter (context only, do NOT translate them):\n"
+                + json.dumps(_ctx[-8:], ensure_ascii=False) + "\n\n" + user)
+    # Haqiqiy sinovda 3.5-flash-lite bir marta buzuq JSON, 3.1-flash-lite 503 berdi va
+    # butun sahifa Google'ning quruq tarjimasida qoldi. Endi har model 2 marta, oraliqda kutib.
+    for attempt in range(2):
+        for spec in GEMINI_MODELS:
+            model, _, level = spec.partition(":")
+            body = json.dumps({
+                "systemInstruction": {"parts": [{"text": _GEMINI_SYSTEM}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json",
+                                     "thinkingConfig": {"thinkingLevel": level or "minimal"}},
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                data=body, headers={"x-goog-api-key": GEMINI_KEY, "content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+                out = _parse_list(text)
+                if isinstance(out, list) and len(out) == len(english):
+                    _ctx.extend(english)
+                    del _ctx[:-8]
+                    return [str(s or "") for s in out]
+                logger.info("Gemini %s: javob mos emas (%s)", model, text[:80])
+            except Exception as exc:
+                logger.info("Gemini %s ishlamadi (%s)", model, str(exc)[:120])
+        time.sleep(2 + 3 * attempt)
     return None
 
 
