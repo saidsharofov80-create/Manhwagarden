@@ -1,4 +1,5 @@
 python-telegram-bot==21.6
+ollama==0.6.2
 Pillow>=10.0.0
 python-dotenv>=1.0.0
 numpy>=1.26.0
@@ -7,5 +8,4 @@ pypdfium2>=5.0
 # Tezkor OCR (sahifa ~1-2 sek). opencv ham shu bilan keladi - inpaint va flood fill uchun
 rapidocr>=3.9
 onnxruntime>=1.24
-httpx
-ollama==0.6.2
+wordninja>=2.0
