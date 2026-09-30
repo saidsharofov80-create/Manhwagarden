@@ -258,6 +258,9 @@ def _disk_report() -> str:
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Bot va AI tayyormi - shu yerda ko'rinadi."""
+    if not admins.is_allowed(update.effective_user.id):
+        await start(update, context)        # begona: ruxsat so'rash oqimi
+        return
     lines = ["Bot: ishlayapti ✅"]
     busy = "hozir 1 ta ish bajarilyapti" if _current["job"] else "bo'sh"
     lines.append(f"Navbat: {busy}, kutayotganlar: {len(_waiting)} ta")
