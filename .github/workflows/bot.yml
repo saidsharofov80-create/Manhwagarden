@@ -38,5 +38,7 @@ jobs:
           GATE_URL: https://manhwa-gate.compass-crm.workers.dev
           ADMINS_URL: https://manhwa-gate.compass-crm.workers.dev/admins
           OCR_ENGINE: fast
+          # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
+          IDLE_EXIT: "999999"
           BOT_SLOT: "1"
         run: .venv/bin/python runner.py
