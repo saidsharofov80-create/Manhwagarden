@@ -13,6 +13,7 @@ Ikki nozik joyi bor (sinovda ko'rilgan nuqsonlar shu yerda tuzatilgan):
 """
 
 import logging
+import math
 import os
 import re
 import threading
@@ -112,11 +113,18 @@ def _text_ink(sub: np.ndarray, bg: tuple[int, int, int], thr: int = 35) -> np.nd
 
     gray = cv2.cvtColor(np.ascontiguousarray(sub), cv2.COLOR_RGB2GRAY).astype(np.int16)
     kernel = np.ones((21, 21), np.uint8)
-    if sum(bg) / 3 > 110:
-        back = cv2.morphologyEx(gray.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(np.int16)
-        return (back - gray) > thr
-    back = cv2.morphologyEx(gray.astype(np.uint8), cv2.MORPH_OPEN, kernel).astype(np.int16)
-    return (gray - back) > thr
+    op = cv2.MORPH_CLOSE if sum(bg) / 3 > 110 else cv2.MORPH_OPEN
+    sign = 1 if op == cv2.MORPH_CLOSE else -1
+    back = cv2.morphologyEx(gray.astype(np.uint8), op, kernel).astype(np.int16)
+    ink = sign * (back - gray) > thr
+    if FONT_STYLES:
+        # Rangli harf (binafsha pufakchada binafsha yozuv) kulrangda fondan deyarli farq qilmaydi -
+        # har RGB kanal alohida tekshiriladi (haqiqiy bobda "HE DIED..." harf qoldig'i qolgan edi).
+        for ch in range(3):
+            c = np.ascontiguousarray(sub[..., ch])
+            b = cv2.morphologyEx(c, op, kernel).astype(np.int16)
+            ink |= sign * (b - c.astype(np.int16)) > max(thr + 25, 45)
+    return ink
 
 
 def _flood_gradient(sub: np.ndarray, tbox: tuple[int, int, int, int],
@@ -221,6 +229,11 @@ def _erase_text_smooth(sub: np.ndarray, fill: np.ndarray, tbox: tuple[int, int, 
     if not mask.any():
         return
     mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3).astype(bool) & fill
+    if FONT_STYLES:
+        tmp = sub.copy()
+        _fill_masked(tmp, (0, 0, w, h), mask, fill, margin=0)
+        sub[mask] = tmp[mask]
+        return
     # To'ldirish: harfsiz pufakcha piksellaridan NORMALLASHTIRILGAN blur - gradient silliq
     # davom etadi. (cv2.inpaint TELEA harf chetidagi kulrangni tortib, dog' qoldirardi.)
     known = (fill & ~mask).astype(np.float32)
@@ -748,7 +761,9 @@ def _draw_in_shape(draw, shape, text_box, text: str, color, max_size: int | None
     depth = _shape_depth(shape)
     start = max_size or 60
     for size in range(max(10, start), 9, -1):
-        mask = depth > max(3, size // 3)       # matn pufakcha chizig'iga tegmasin
+        # matn pufakcha chizig'iga tegmasin. FONT_STYLES botida kengroq zaxira (foydalanuvchi:
+        # "mayda so'zlar chegarasidan chiqib ketyapti")
+        mask = depth > (max(6, int(size * 0.55)) if FONT_STYLES else max(3, size // 3))
         if not mask.any():
             continue
         cx, cy = (tx1 + tx2) // 2 - ox, (ty1 + ty2) // 2 - oy
@@ -763,6 +778,72 @@ def _draw_in_shape(draw, shape, text_box, text: str, color, max_size: int | None
                       stroke_width=_bold(font), stroke_fill=color)
         return True
     return False
+
+
+def _fill_masked(arr: np.ndarray, box: tuple[int, int, int, int], mask: np.ndarray,
+                 allowed: np.ndarray | None = None, margin: int = 48) -> None:
+    """box ichidagi mask piksellarini atrofdan SILLIQ va TEKSTURALI to'ldiradi (FONT_STYLES).
+
+    Foydalanuvchi: "clean bilinib qolmoqda - smooth qil, sezilmasin". Oldingi usullar:
+    TELEA - xira dog'; faqat quti ichidan blur - atrofdan ajralib turgan to'rtburchak yamoq
+    (qizil gradientli pufakcha) va donador (qog'oz teksturali) pufakchada oq silliq dog'.
+    Endi: 1) fon rangi kengroq atrofdan (margin) ko'p o'lchamli normallashtirilgan blur bilan;
+    2) ustiga yaqin harfsiz joydan olingan mayda tekstura (donadorlik) qo'shiladi;
+    3) yamoq cheti yumshoq aralashtiriladi.
+    allowed - to'ldirish uchun "ma'lum" hisoblanadigan piksellar (pufakcha ichi), box o'lchamida.
+    """
+    import cv2
+
+    H, W = arr.shape[:2]
+    x1, y1, x2, y2 = box
+    X1, Y1, X2, Y2 = max(0, x1 - margin), max(0, y1 - margin), min(W, x2 + margin), min(H, y2 + margin)
+    ctx = arr[Y1:Y2, X1:X2].astype(np.float32)
+    m = np.zeros(ctx.shape[:2], bool)
+    m[y1 - Y1:y2 - Y1, x1 - X1:x2 - X1] = mask
+    ok_known = np.ones_like(m)
+    if allowed is not None:
+        ok_known[:] = False
+        ok_known[y1 - Y1:y2 - Y1, x1 - X1:x2 - X1] = allowed
+    known = (ok_known & ~m).astype(np.float32)
+    est = np.zeros_like(ctx)
+    den = np.zeros(m.shape, np.float32)
+    for k in (9, 25, 61, 151):
+        d = cv2.GaussianBlur(known, (k, k), 0)
+        n = cv2.GaussianBlur(ctx * known[..., None], (k, k), 0)
+        good = (den < 1e-3) & (d > 0.08)
+        est[good] = n[good] / d[good][:, None]
+        den[good] = d[good]
+    miss = m & (den <= 1e-3)
+    if miss.any():                                  # juda katta bo'shliq - o'rtacha rang
+        est[miss] = ctx[known > 0].mean(axis=0) if known.any() else ctx[miss].mean(axis=0)
+    # Tekstura: yaqin harfsiz joydagi mayda donadorlik ko'chiriladi
+    grain = ctx - cv2.GaussianBlur(ctx, (0, 0), 1.6)
+    tex = np.zeros_like(ctx)
+    need = m.copy()
+    hh, ww = m.shape
+    mh = max(6, int(mask.any(axis=1).sum() * 0.6))
+    for dy, dx in ((-mh, 0), (mh, 0), (0, -mh), (0, mh), (-2 * mh, 0), (2 * mh, 0), (0, -2 * mh), (0, 2 * mh)):
+        if not need.any():
+            break
+        src = np.zeros_like(need)
+        ys, xs = np.nonzero(need)
+        sy, sx = ys + dy, xs + dx
+        inb = (sy >= 0) & (sy < hh) & (sx >= 0) & (sx < ww)
+        ys, xs, sy, sx = ys[inb], xs[inb], sy[inb], sx[inb]
+        use = known[sy, sx] > 0
+        tex[ys[use], xs[use]] = grain[sy[use], sx[use]]
+        need[ys[use], xs[use]] = False
+    filled = np.clip(est + tex * 0.9, 0, 255)
+    # yumshoq chet: niqob 1-2 px ichkariga qarab to'liq
+    alpha = cv2.GaussianBlur(m.astype(np.float32), (5, 5), 0)
+    alpha = np.maximum(alpha, m * 0.0)
+    alpha[m] = np.maximum(alpha[m], 0.85)
+    out = ctx * (1 - alpha[..., None]) + filled * alpha[..., None]
+    if allowed is not None:                         # pufakcha tashqarisiga tegmaymiz
+        inside = np.zeros_like(m)
+        inside[y1 - Y1:y2 - Y1, x1 - X1:x2 - X1] = allowed | mask
+        out[~inside] = ctx[~inside]
+    arr[Y1:Y2, X1:X2] = out.astype(np.uint8)
 
 
 def _inpaint_text(arr: np.ndarray, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
@@ -796,7 +877,10 @@ def _inpaint_text(arr: np.ndarray, box: tuple[int, int, int, int]) -> tuple[int,
     try:
         import cv2
 
-        mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=2)
+        mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=3 if FONT_STYLES else 2)
+        if FONT_STYLES:
+            _fill_masked(arr, (x1, y1, x2, y2), mask > 0)
+            return (x1, y1, x2, y2)
         fixed = cv2.inpaint(np.ascontiguousarray(region[:, :, ::-1]), mask, 4, cv2.INPAINT_TELEA)
         arr[y1:y2, x1:x2] = fixed[:, :, ::-1]
     except Exception:
@@ -855,6 +939,10 @@ def _system_ink(arr: np.ndarray, box: tuple[int, int, int, int],
         arr[y1:y2, max(0, x1 - p):x1].reshape(-1, 3), arr[y1:y2, x2:min(W, x2 + p)].reshape(-1, 3)])
     if len(ring) >= 20:
         bg = tuple(np.median(ring, axis=0))
+        # Tekis (naqshsiz) qora pufakcha: oddiy pufakcha yo'li bilan tekis bo'yaladi.
+        # Haqiqiy bobda "HMPH, YOU'RE..." qora pufakchasi inpaint bilan xira iz qoldirgan edi.
+        if float(lum(ring.astype(np.float32)).std()) < 14:
+            return None
     bgl = float(lum(np.array(bg, np.float32)))
     if bgl > 130:
         return None
@@ -911,6 +999,68 @@ def _bubble_style(shape, touched: int) -> str:
     return "speech"
 
 
+# Qiyalik (FONT_STYLES): asl yozuv 2.5-20 daraja qiya bo'lsa - tarjima ham shunday buriladi.
+TILT_MIN, TILT_MAX = 2.5, 20.0
+
+
+def _draw_job(out: Image.Image, draw, job, off: tuple[int, int]) -> None:
+    """Bitta ishni chizadi. off - draw ning out ga nisbatan siljishi (qiya chizish qatlami uchun)."""
+    ox, oy = off
+    mode, box, bg_color, text, extra = job[:5]
+    box = (box[0] - ox, box[1] - oy, box[2] - ox, box[3] - oy)
+    W, H = out.size
+    if mode == "bubble":
+        color = job[8] or _text_color_for(bg_color)
+        shape, tbox = job[5], job[6]
+        if shape is not None:
+            shape = (shape[0] - ox, shape[1] - oy, shape[2])
+        tbox = (tbox[0] - ox, tbox[1] - oy, tbox[2] - ox, tbox[3] - oy)
+        if shape is None or not _draw_in_shape(draw, shape, tbox, text, color, extra):
+            _draw_block(draw, box, text, color, max_size=extra)
+    elif mode == "system":
+        dark = tuple(int(v * 0.35) for v in bg_color)
+        _draw_block(draw, box, text, job[5], max_size=extra, stroke=dark, pad=2)
+    elif mode == "art":
+        # Rasm ustida o'qilishi uchun: fon yorug' bo'lsa qora matn oq kontur bilan,
+        # qorong'i bo'lsa aksincha
+        ab = (box[0] + ox, box[1] + oy, box[2] + ox, box[3] + oy)
+        region = np.asarray(out.crop(ab).convert("L"))
+        bright = region.mean() > 140 if region.size else True
+        fg, st = ((20, 20, 20), (255, 255, 255)) if bright else ((255, 255, 255), (0, 0, 0))
+        _draw_block(draw, box, text, fg, max_size=extra, stroke=st, pad=2)
+    else:
+        _draw_sfx_label(draw, box, text, W, H, extra or 40)
+
+
+def _draw_tilted(out: Image.Image, job, angle: float) -> None:
+    """Matnni shaffof qatlamga tekis chizib, asl yozuv qiyaligida burib qo'yadi."""
+    # Asl qiya yozuv qutisi (OCR) - burilgan to'rtburchakning tashqi qutisi. Undan burilmagan
+    # to'rtburchak (a x b) topiladi: tarjima shunga tekis yoziladi va burilgach aynan asl
+    # yozuv joyini egallaydi (pufakcha shakliga yoyilsa, burchaklari chiziqdan chiqardi).
+    tx1, ty1, tx2, ty2 = job[6] if job[0] == "bubble" else job[1]
+    bw, bh = tx2 - tx1, ty2 - ty1
+    c, sn = math.cos(math.radians(abs(angle))), math.sin(math.radians(abs(angle)))
+    den = max(0.2, c * c - sn * sn)
+    a = max(bw * 0.6, (bw * c - bh * sn) / den) * 1.08
+    b = max(bh * 0.6, (bh * c - bw * sn) / den) * 1.15
+    cx, cy = (tx1 + tx2) / 2, (ty1 + ty2) / 2
+    ubox = (int(cx - a / 2), int(cy - b / 2), int(cx + a / 2), int(cy + b / 2))
+    if job[0] == "bubble":
+        job = ("bubble", ubox) + tuple(job[2:5]) + (None, ubox) + tuple(job[7:])
+    else:
+        job = (job[0], ubox) + tuple(job[2:])
+    x1, y1, x2, y2 = ubox
+    pw, ph = int((x2 - x1) * 0.3) + 10, int((y2 - y1) * 0.6) + 10
+    W, H = out.size
+    rx1, ry1, rx2, ry2 = max(0, x1 - pw), max(0, y1 - ph), min(W, x2 + pw), min(H, y2 + ph)
+    layer = Image.new("RGBA", (rx2 - rx1, ry2 - ry1), (0, 0, 0, 0))
+    ldraw = ImageDraw.Draw(layer)
+    _draw_job(out, ldraw, job, (rx1, ry1))
+    # rasm koordinatasida y pastga: musbat burchak - soat yo'nalishida, PIL da manfiy
+    rot = layer.rotate(-angle, resample=Image.BICUBIC, center=(cx - rx1, cy - ry1))
+    out.paste(rot, (rx1, ry1), rot)
+
+
 def render_translation(image_bytes: bytes, translations: list[dict], quality: int = 95) -> bytes:
     image = load_image(image_bytes)
     arr = np.array(image)
@@ -944,6 +1094,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
         upper = mostly_upper(item.get("original") or "")
         uzbek_text = display_text(uzbek_text, upper)
         line_h = item.get("line_h")
+        angle = float(item.get("angle") or 0.0) if FONT_STYLES else 0.0
         # Shrift asl harf o'lchamidan oshmasin. OCR qutisi harfdan ~25% baland
         # (bo'shliqlar bilan), shuning uchun 0.8: 0.95 da haqiqiy bobda tarjima
         # asl yozuvdan sezilarli katta chiqdi.
@@ -963,7 +1114,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
             if sys_ink:
                 # naqshli fon saqlanadi: faqat harflar o'chiriladi, o'z shriftida yoziladi
                 area = _inpaint_text(arr, box)
-                jobs.append(("system", area, bg_color, uzbek_text, max_size, sys_ink))
+                jobs.append(("system", area, bg_color, uzbek_text, max_size, sys_ink, angle))
                 continue
         before = _ink(arr, box, bg_color)
         filled = _fill_bubble(arr, box, bg_color)
@@ -994,10 +1145,10 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
                             100 * after / before)
                 _erase_ink(arr, box, bg_color)
             jobs.append(("bubble", inner, bg_color, uzbek_text, max_size, shape, box, upper,
-                         ink_color, style))
+                         ink_color, style, angle))
         else:
             area = _inpaint_text(arr, box)
-            jobs.append(("art", area, None, uzbek_text, max_size))
+            jobs.append(("art", area, None, uzbek_text, max_size, angle))
 
     jobs = _merge_same_bubble(jobs)
 
@@ -1007,23 +1158,11 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
     for job in jobs:
         mode, box, bg_color, text, extra = job[:5]
         _style.name = job[9] if mode == "bubble" else mode
-        if mode == "bubble":
-            color = job[8] or _text_color_for(bg_color)
-            shape, tbox = job[5], job[6]
-            if shape is None or not _draw_in_shape(draw, shape, tbox, text, color, extra):
-                _draw_block(draw, box, text, color, max_size=extra)
-        elif mode == "system":
-            dark = tuple(int(v * 0.35) for v in bg_color)
-            _draw_block(draw, box, text, job[5], max_size=extra, stroke=dark, pad=2)
-        elif mode == "art":
-            # Rasm ustida o'qilishi uchun: fon yorug' bo'lsa qora matn oq kontur bilan,
-            # qorong'i bo'lsa aksincha
-            region = np.asarray(out.crop(box).convert("L"))
-            bright = region.mean() > 140 if region.size else True
-            fg, st = ((20, 20, 20), (255, 255, 255)) if bright else ((255, 255, 255), (0, 0, 0))
-            _draw_block(draw, box, text, fg, max_size=extra, stroke=st, pad=2)
-        else:
-            _draw_sfx_label(draw, box, text, W, H, extra or 40)
+        angle = job[-1] if mode in ("bubble", "system", "art") else 0.0
+        if abs(angle) >= TILT_MIN and abs(angle) <= TILT_MAX:
+            _draw_tilted(out, job, angle)
+            continue
+        _draw_job(out, draw, job, (0, 0))
 
     _style.name = "speech"
     return encode_jpeg(out, quality=quality)
@@ -1086,7 +1225,7 @@ def _merge_same_bubble(jobs: list) -> list:
                           max(prev[6][2], job[6][2]), max(prev[6][3], job[6][3]))
                     out[k] = ("bubble", prev[1], prev[2], prev[3] + " " + job[3],
                               min(sizes) if sizes else None, prev[5], tb, prev[7], prev[8],
-                              prev[9])
+                              prev[9], prev[10])
                     break
             else:
                 out.append(job)
@@ -1099,7 +1238,7 @@ def _open_bubble_box(inner, box, W: int, H: int):
     """Ochiq pufakcha uchun yozish qutisi: asl matn qutisi, ozgina kengaytirilgan."""
     x1, y1, x2, y2 = box
     bw, bh = x2 - x1, y2 - y1
-    mx, my = int(bw * 0.06), int(bh * 0.25)
+    mx, my = int(bw * 0.02), int(bh * 0.25)   # yon tomonga deyarli kengaytirmaymiz - chiziqqa tegmasin
     edge = int(W * 0.03)                    # sahifa chetiga yopishmasin
     return (max(inner[0], x1 - mx, edge), max(inner[1], y1 - my),
             min(inner[2], x2 + mx, W - edge), min(inner[3], y2 + my, H))

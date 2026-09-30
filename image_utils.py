@@ -170,6 +170,7 @@ def merge_lines(items: list[dict], image: Image.Image | None = None) -> list[dic
             "score": min(m.get("score", 1.0) for m in members),
             # Asl harf balandligi - chizishda tarjima shu o'lchamdan oshmaydi
             "line_h": float(np.median(heights)) if heights else None,
+            "angle": float(np.median([m.get("angle", 0.0) for m in members])),
         })
     return merged
 

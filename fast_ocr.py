@@ -123,9 +123,17 @@ def _run(kind: str, arr: np.ndarray) -> list[dict]:
         pts = np.asarray(poly, dtype=float)
         x1, y1 = pts[:, 0].min(), pts[:, 1].min()
         x2, y2 = pts[:, 0].max(), pts[:, 1].max()
+        # Qiyalik (2026-10-01, foydalanuvchi: "ba'zi textlar qiyshiq chizilgan - tarjima ham shunday
+        # bo'lsin"): poligon tartibi chap-yuqori, o'ng-yuqori, o'ng-past, chap-past. Qiya qatorda
+        # y2-y1 harfdan ancha katta chiqadi - haqiqiy balandlik chap/o'ng qirralardan olinadi.
+        angle, true_h = 0.0, float(y2 - y1)
+        if len(pts) == 4:
+            angle = float(np.degrees(np.arctan2(pts[1, 1] - pts[0, 1], pts[1, 0] - pts[0, 0])))
+            true_h = float((np.hypot(*(pts[3] - pts[0])) + np.hypot(*(pts[2] - pts[1]))) / 2)
         out.append({"bbox": [float(x1), float(y1), float(x2), float(y2)],
                     "original": text, "score": float(score),
-                    "line_h": float(y2 - y1)})
+                    "line_h": true_h if abs(angle) >= 2 else float(y2 - y1),
+                    "angle": angle if abs(angle) < 45 else 0.0})
     return out
 
 
