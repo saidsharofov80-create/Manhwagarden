@@ -214,6 +214,46 @@ async def add_by_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return True
 
 
+def _dir_size(path: Path) -> tuple[int, int]:
+    """Papkadagi fayllar soni va umumiy hajmi (bayt)."""
+    n = size = 0
+    if path.exists():
+        for f in path.rglob("*"):
+            if f.is_file():
+                n += 1
+                size += f.stat().st_size
+    return n, size
+
+
+def _server_line() -> str:
+    cores = os.cpu_count() or 0
+    if os.getenv("GITHUB_ACTIONS"):
+        return f"Server: GitHub Actions, {cores} yadro (ish bo'lmasa uxlaydi)"
+    return f"Server: {cores} yadro"
+
+
+def _disk_report() -> str:
+    """Botning o'zi diskka nima yozadi - /holat da ko'rsatiladi."""
+    import shutil
+
+    mb = lambda b: f"{b / 1024 / 1024:.1f} MB"
+    _, _, free = shutil.disk_usage(str(BASE_DIR))
+    jobs = [p for p in ARCHIVE_DIR.iterdir() if p.is_dir()] if ARCHIVE_DIR.exists() else []
+    _, arch = _dir_size(ARCHIVE_DIR)
+    _, logs = _dir_size(LOG_DIR)
+    lines = [
+        f"Disk: {free / 1e9:.1f} GB bo'sh. Bot yozadigan fayllar:",
+        f"• arxiv: {len(jobs)} ta ish, {mb(arch)} (oxirgi {ARCHIVE_KEEP} ta: kirish + natija PDF)",
+        f"• loglar: {mb(logs)} (ko'pi bilan ~20 MB)",
+        "• adminlar ro'yxati (admins.json)",
+        "Yakka rasmlar diskka yozilmaydi (xotirada ishlanadi), PDF boblar - faqat arxivga.",
+    ]
+    if os.getenv("GITHUB_ACTIONS"):
+        lines.append("GitHub'da disk vaqtinchalik: bot uxlaganda hammasi o'chadi "
+                     "(adminlar Cloudflare'da saqlanadi).")
+    return "\n".join(lines)
+
+
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Bot va AI tayyormi - shu yerda ko'rinadi."""
     lines = ["Bot: ishlayapti ✅"]
@@ -229,22 +269,26 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         lines.append(f"O'qish (tezkor OCR): xato ❌ ({exc})")
 
-    # Zaxira: Ollama javob beradimi va qaysi model ishlatiladi
-    try:
-        import urllib.request
+    # Zaxira AI (Ollama) faqat noutbukda bor. GitHub/telefonda OCR_ENGINE=fast -
+    # u yerda Ollama umuman ishlatilmaydi, "ulanmadi ⚠️" deyish noto'g'ri signal edi.
+    from translator import OCR_ENGINE
 
-        from config import OLLAMA_HOST
-        from translator import MODEL
-
-        with urllib.request.urlopen(OLLAMA_HOST.rstrip("/") + "/api/tags", timeout=5) as r:
+    if OCR_ENGINE == "fast":
+        lines.append("Zaxira AI (Ollama): bu serverda kerak emas ✅ (faqat tezkor OCR)")
+    else:
+        try:
             import json as _json
+            import urllib.request
 
-            names = [m["name"] for m in _json.loads(r.read().decode("utf-8")).get("models", [])]
-        ok = MODEL in names
-        lines.append(f"Zaxira AI (Ollama): {'javob beryapti ✅' if ok else 'model topilmadi ⚠️'}")
-        lines.append(f"Zaxira model: {MODEL}")
-    except Exception:
-        lines.append("Zaxira AI (Ollama): ulanmadi ⚠️ (oddiy sahifalar baribir ishlaydi)")
+            from config import OLLAMA_HOST
+            from translator import MODEL
+
+            with urllib.request.urlopen(OLLAMA_HOST.rstrip("/") + "/api/tags", timeout=5) as r:
+                names = [m["name"] for m in _json.loads(r.read().decode("utf-8")).get("models", [])]
+            ok = MODEL in names
+            lines.append(f"Zaxira AI (Ollama): {'javob beryapti ✅' if ok else 'model topilmadi ⚠️'}")
+        except Exception:
+            lines.append("Zaxira AI (Ollama): ulanmadi ⚠️ (oddiy sahifalar baribir ishlaydi)")
 
     # Tarjima xizmati
     try:
@@ -255,15 +299,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         lines.append(f"Tarjima: xato ❌ ({exc})")
 
-    # Bo'sh xotira (model ~6 GB talab qiladi)
-    try:
-        import shutil
-
-        total, used, free = shutil.disk_usage(str(BASE_DIR))
-        lines.append(f"Disk: {free / 1e9:.1f} GB bo'sh")
-    except Exception:
-        pass
-
+    lines.append(_server_line())
+    lines.append(_disk_report())
     lines.append("\nRasm yuboring — men tayyorman.")
     await update.message.reply_text("\n".join(lines))
 
