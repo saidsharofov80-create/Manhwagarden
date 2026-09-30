@@ -969,6 +969,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
         filled = _fill_bubble(arr, box, bg_color)
         if filled is not None:
             inner, touched, shape = filled
+            style = _bubble_style(shape, touched)   # shakl quyida (ochiq pufakchada) tashlanishidan oldin
             if touched:
                 inner = _limit_area(inner, box)
                 if RENDER_V2:
@@ -987,12 +988,13 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
                 after = int(_text_ink(arr[by1:by2, bx1:bx2], bg_color).sum())
             else:
                 after = _ink(arr, box, bg_color)
-            if before and after / before > 0.15:
+            # 2026-10-01 (foydalanuvchi: "boshqa til butunlay o'chirilsin"): 15% -> 5%
+            if before and after / before > (0.05 if RENDER_V2 else 0.15):
                 logger.info("Asl yozuv to'liq o'chmadi (%.0f%% qoldi) - qayta o'chirilmoqda",
                             100 * after / before)
                 _erase_ink(arr, box, bg_color)
             jobs.append(("bubble", inner, bg_color, uzbek_text, max_size, shape, box, upper,
-                         ink_color, _bubble_style(shape, touched)))
+                         ink_color, style))
         else:
             area = _inpaint_text(arr, box)
             jobs.append(("art", area, None, uzbek_text, max_size))

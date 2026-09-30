@@ -509,15 +509,45 @@ Rules:
 - A line may start mid-sentence (continuing the previous bubble, e.g. "...and also, my fiancee."): keep it as a continuation, do not capitalize it into a new idea.
 - Keep the speaker's register consistent: servants and subordinates use "siz" and polite forms; close friends and rivals may use "sen".
 - Write o' and g' correctly (o'zgargan, not ozgargan); no Russian or English words unless they are names.
-Return ONLY a JSON array of strings: exactly one Uzbek string per input line, same order."""
+- NAMES must be IDENTICAL everywhere in the chapter: transliterate a name once (Latin, e.g. "JIMIN" -> "Jimin",
+  "DUWON" -> "Duvon") and reuse exactly that spelling; never translate a name as a word, never drop part of it
+  ("Kim Jimin" stays two words). If a list of names already used is given - copy those spellings exactly.
+Return ONLY a JSON object: {"lines": [exactly one Uzbek string per input line, same order],
+"names": {"<name as in the English source>": "<exact spelling you used>", ...}} ("names" lists every
+character/place/guild name in these lines; {} if none)."""
 
 
 _ctx: list[str] = []          # oldingi sahifa(lar)ning oxirgi gaplari - Gemini uchun kontekst
+# ISMLAR (2026-10-01, foydalanuvchi: "ism doim bir xil bo'lsin", "ismlarda xato"): bob davomida
+# har ismning birinchi yozilishi eslab qolinadi va keyingi sahifalarga "aynan shunday yoz" deb beriladi.
+_names: dict[str, str] = {}   # "JIMIN" -> "Jimin"
+_last_call = {"t": 0.0}
+NEW_CHAPTER_GAP = 600         # shuncha soniya tarjima bo'lmasa - yangi bob (kontekst tozalanadi)
+
+
+def new_chapter() -> None:
+    _ctx.clear()
+    _names.clear()
 
 
 def _parse_list(text: str) -> list | None:
-    """Gemini javobidan JSON massivni ajratadi (```json ... ``` o'rami, oxiridagi izoh bo'lsa ham)."""
+    """Gemini javobidan JSON massivni ajratadi (```json ... ``` o'rami, oxiridagi izoh bo'lsa ham).
+
+    {"lines": [...], "names": {...}} ko'rinishida kelsa - ismlar _names ga yig'iladi."""
     text = text.strip()
+    j, k = text.find("{"), text.find("[")
+    if j >= 0 and (k < 0 or j < k):
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text[j:])
+            if isinstance(obj, dict) and isinstance(obj.get("lines"), list):
+                names = obj.get("names")
+                if isinstance(names, dict):
+                    for src, uz in names.items():
+                        if isinstance(src, str) and isinstance(uz, str) and src.strip() and uz.strip():
+                            _names.setdefault(src.strip().upper(), uz.strip())
+                return obj["lines"]
+        except ValueError:
+            pass
     i = text.find("[")
     if i < 0:
         return None
@@ -565,13 +595,27 @@ def apply_rules(text: str) -> str:
     return text
 
 
+def _same_names(line: str) -> str:
+    """Model ismni inglizcha qoldirgan joyda ham ("LIM DUWON") - bobdagi yozilishi ("Lim Duvon")."""
+    for src, uz in _names.items():
+        if src != uz.upper() and len(src) >= 3:
+            line = re.sub(r"(?<!\w)" + re.escape(src) + r"(?!\w)", uz, line, flags=re.IGNORECASE)
+    return line
+
+
 def _gemini(english: list[str], drafts: list[str]) -> list[str] | None:
+    if time.time() - _last_call["t"] > NEW_CHAPTER_GAP:
+        new_chapter()
+    _last_call["t"] = time.time()
     user = ("Each item is [English source, rough machine translation]. The machine translation is "
             "usually accurate but stiff and literal. Write the final natural Uzbek line:\n"
             + json.dumps([[e, d] for e, d in zip(english, drafts)], ensure_ascii=False))
     if _ctx:
         user = ("Previous bubbles of this chapter (context only, do NOT translate them):\n"
                 + json.dumps(_ctx[-8:], ensure_ascii=False) + "\n\n" + user)
+    if _names:
+        user = ("Names already used in this chapter - write them EXACTLY like this:\n"
+                + json.dumps(dict(list(_names.items())[-40:]), ensure_ascii=False) + "\n\n" + user)
     # Haqiqiy sinovda 3.5-flash-lite bir marta buzuq JSON, 3.1-flash-lite 503 berdi va
     # butun sahifa Google'ning quruq tarjimasida qoldi. Endi har model 2 marta, oraliqda kutib.
     system = _system_prompt()
@@ -603,9 +647,10 @@ def _gemini(english: list[str], drafts: list[str]) -> list[str] | None:
                                if not p.get("thought"))
                 out = _parse_list(text)
                 if isinstance(out, list) and len(out) == len(english):
+                    _last_call["t"] = time.time()
                     _ctx.extend(english)
                     del _ctx[:-8]
-                    return [str(s or "") for s in out]
+                    return [_same_names(" ".join(str(s or "").split())) for s in out]
                 logger.info("Gemini %s: javob mos emas (%s)", model, text[:80])
             except urllib.error.HTTPError as exc:
                 try:
