@@ -47,6 +47,9 @@ jobs:
           FONT_STYLES: "1"
           # Ochiq bot: tarjimadan hamma foydalanadi (qoidalar/adminlar - faqat adminlarga)
           PUBLIC_BOT: "1"
+          # Oddiy foydalanuvchiga 1 ta bepul bob, keyin egasiga murojaat (@sharofovsaid)
+          FREE_CHAPTERS: "1"
+          OWNER_USERNAME: sharofovsaid
           BOT_SLOT: "1"
           # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
           IDLE_EXIT: "999999"

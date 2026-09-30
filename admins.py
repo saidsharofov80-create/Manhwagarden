@@ -126,3 +126,24 @@ def remove_rule(n: int) -> str | None:
     gone = rules.pop(n - 1)
     _save(data)
     return gone
+
+
+# BEPUL BOB (2026-09-30, @Manhwatarjima1_bot - foydalanuvchi: "hammaga faqat bitta bob,
+# yana qilmoqchi bo'lsa mening akkauntim chiqsin"). FREE_CHAPTERS=0 - cheklov yo'q.
+# Hisob adminlar faylida (Cloudflare'da ham) - runner almashsa ham yo'qolmaydi.
+FREE_CHAPTERS = int(os.getenv("FREE_CHAPTERS", "0") or 0)
+
+
+def used_chapters(user_id: int) -> int:
+    return int(_load().get("used", {}).get(str(user_id), 0))
+
+
+def add_used(user_id: int, delta: int = 1) -> None:
+    data = _load()
+    used = data.setdefault("used", {})
+    n = max(0, int(used.get(str(user_id), 0)) + delta)
+    if n:
+        used[str(user_id)] = n
+    else:
+        used.pop(str(user_id), None)
+    _save(data)

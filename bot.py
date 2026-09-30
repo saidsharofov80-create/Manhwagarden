@@ -117,7 +117,9 @@ def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
             f"• PDF: bir martada {MAX_PDF_PAGES} sahifagacha\n"
             "• Rasmni 'fayl' sifatida yuborsangiz sifat yo'qolmaydi\n"
             "• Bir nechta fayl - navbat bilan birma-bir\n"
-            "• Bitta bob odatda 1.5-3 daqiqa"),
+            "• Bitta bob odatda 1.5-3 daqiqa"
+            + (f"\n\n🎁 Bepul: {admins.FREE_CHAPTERS} ta bob (bitta PDF yoki birga yuborilgan rasmlar albomi)."
+               if admins.FREE_CHAPTERS and not admins.is_admin(user_id) else "")),
             InlineKeyboardMarkup([[_btn("📋 Navbatni ko'rish", "m:do:navbat")], back]))
     if name == "qoidalar":
         rules = admins.list_rules()
@@ -561,8 +563,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
+    # Bepul cheklov: oddiy foydalanuvchiga FREE_CHAPTERS ta bob. Bitta bob = bitta PDF
+    # yoki bitta albom (birga yuborilgan rasmlar, media_group_id bir xil) yoki bitta rasm.
+    charged = False
+    if admins.FREE_CHAPTERS and not admins.is_admin(user_id):
+        group = msg.media_group_id
+        if not (group and _free_groups.get(user_id) == group):
+            if admins.used_chapters(user_id) >= admins.FREE_CHAPTERS:
+                await msg.reply_text(await _limit_text(context))
+                return
+            admins.add_used(user_id)
+            charged = True
+            if group:
+                _free_groups[user_id] = group
+
     mine = sum(1 for j in _waiting if j["user"] == user_id)
     if mine >= MAX_QUEUE_PER_USER:
+        if charged:
+            admins.add_used(user_id, -1)
         await msg.reply_text(f"Navbatda sizning {mine} ta ishingiz bor — avval ular tugasin.")
         return
 
@@ -576,10 +594,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     fname = (msg.document.file_name if msg.document else None) or "rasm"
     job = {"update": update, "context": context, "user": user_id, "id": _job_counter["n"],
            "name": fname, "who": update.effective_user.full_name or str(user_id),
-           "cancelled": False, "status": await msg.reply_text(text)}
+           "cancelled": False, "free": charged, "status": await msg.reply_text(text)}
     _waiting.append(job)
     await _queue.put(job)
     logger.info("Navbatga qo'yildi: user=%s, oldinda=%d", user_id, ahead)
+
+
+_free_groups: dict[int, str] = {}      # bepul bob sifatida qabul qilingan albom (foydalanuvchi -> id)
+_owner_contact: dict = {}
+
+
+async def _limit_text(context) -> str:
+    """Bepul bob tugaganda - bot egasining akkaunti (username) bilan xabar."""
+    if "text" not in _owner_contact:
+        name = os.getenv("OWNER_USERNAME", "").lstrip("@")
+        if not name:
+            try:
+                name = (await context.bot.get_chat(OWNER_ID)).username or ""
+            except TelegramError:
+                name = ""
+        who = f"@{name}" if name else f"bot egasiga (ID: {OWNER_ID})"
+        _owner_contact["text"] = who
+    n = admins.FREE_CHAPTERS
+    return (f"Siz bepul {n} ta bobdan foydalanib bo'ldingiz. 🙏\n\n"
+            f"Yana tarjima qildirmoqchi bo'lsangiz, murojaat qiling: {_owner_contact['text']}")
+
+
+def _refund(job: dict) -> None:
+    """Bepul bob bajarilmay qolsa (bekor qilindi / xato) - hisobdan qaytariladi."""
+    if job.get("free"):
+        job["free"] = False
+        try:
+            admins.add_used(job["user"], -1)
+            _free_groups.pop(job["user"], None)
+        except Exception:
+            logger.exception("Bepul bob hisobi qaytarilmadi")
 
 
 async def _queue_worker() -> None:
@@ -589,6 +638,7 @@ async def _queue_worker() -> None:
         if job in _waiting:
             _waiting.remove(job)
         if job.get("cancelled"):               # /navbat orqali bekor qilingan
+            _refund(job)
             _queue.task_done()
             continue
         _current["job"] = job
@@ -597,6 +647,7 @@ async def _queue_worker() -> None:
             await _process_photo(job["update"], job["context"], job["status"])
         except Exception:
             logger.exception("Navbatdagi ish xatosi (user=%s)", job["user"])
+            _refund(job)
             await _edit_status(job["status"], "Kechirasiz, kutilmagan xatolik yuz berdi.")
         finally:
             _current["job"] = None
