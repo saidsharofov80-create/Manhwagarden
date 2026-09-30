@@ -142,7 +142,9 @@ def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
             "• Yangi admin: o'sha odamning xabarini menga forward qiling "
             "yoki u /start bossin - sizga tugmali so'rov keladi\n"
             "• Ro'yxatda har admin yonida o'chirish tugmasi bor"),
-            InlineKeyboardMarkup([[_btn("👥 Adminlar ro'yxati", "m:do:admins")], back]))
+            InlineKeyboardMarkup([[_btn("👥 Adminlar ro'yxati", "m:do:admins")]]
+                                 + ([[_btn("💳 To'lov qilganlar", "m:do:paid")]] if admins.FREE_CHAPTERS else [])
+                                 + [back]))
     if name == "yordam":
         text = (
             "ℹ️ <b>Yordam - buyruqlar</b>\n\n"
@@ -203,7 +205,7 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Bekor qilish: /start")
         return
     handler = {"holat": status_cmd, "navbat": queue_cmd, "id": my_id,
-               "admins": list_admins_cmd}.get(what)
+               "admins": list_admins_cmd, "paid": paid_list_cmd}.get(what)
     if handler:
         await handler(update, context)
 
@@ -566,11 +568,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Bepul cheklov: oddiy foydalanuvchiga FREE_CHAPTERS ta bob. Bitta bob = bitta PDF
     # yoki bitta albom (birga yuborilgan rasmlar, media_group_id bir xil) yoki bitta rasm.
     charged = False
-    if admins.FREE_CHAPTERS and not admins.is_admin(user_id):
+    if admins.FREE_CHAPTERS and not admins.is_admin(user_id) and not admins.is_paid(user_id):
         group = msg.media_group_id
         if not (group and _free_groups.get(user_id) == group):
             if admins.used_chapters(user_id) >= admins.FREE_CHAPTERS:
-                await msg.reply_text(await _limit_text(context))
+                await msg.reply_text(await _limit_text(context, user_id))
+                await _ask_owner_to_pay(context, update.effective_user)
                 return
             admins.add_used(user_id)
             charged = True
@@ -604,7 +607,7 @@ _free_groups: dict[int, str] = {}      # bepul bob sifatida qabul qilingan albom
 _owner_contact: dict = {}
 
 
-async def _limit_text(context) -> str:
+async def _limit_text(context, user_id: int) -> str:
     """Bepul bob tugaganda - bot egasining akkaunti (username) bilan xabar."""
     if "text" not in _owner_contact:
         name = os.getenv("OWNER_USERNAME", "").lstrip("@")
@@ -617,7 +620,99 @@ async def _limit_text(context) -> str:
         _owner_contact["text"] = who
     n = admins.FREE_CHAPTERS
     return (f"Siz bepul {n} ta bobdan foydalanib bo'ldingiz. 🙏\n\n"
-            f"Yana tarjima qildirmoqchi bo'lsangiz, murojaat qiling: {_owner_contact['text']}")
+            f"Qolgan boblarni ham tarjima qilmoqchi bo'lsangiz, shu odam bilan bog'laning: "
+            f"{_owner_contact['text']}\n\n"
+            f"To'lovdan keyin sizga ruxsat beriladi va bot cheklovsiz ishlaydi.\n"
+            f"Sizning ID'ingiz: {user_id} (yozganingizda shuni ham yuboring)")
+
+
+async def _ask_owner_to_pay(context, user) -> None:
+    """Bepul bobi tugagan odam haqida egasiga - bitta tugma bilan ruxsat berish uchun."""
+    if not OWNER_ID or user.id == OWNER_ID:
+        return
+    key = f"tolov_sorovi_{user.id}"
+    if context.bot_data.get(key):          # bir odam uchun bir marta
+        return
+    context.bot_data[key] = True
+    handle = f" (@{user.username})" if user.username else ""
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(f"💳 Bepul bobi tugagan foydalanuvchi:\n\n"
+                  f"Ism: {user.full_name or user.id}{handle}\nID: {user.id}\n\n"
+                  f"To'lov qilsa - pastdagi tugma bilan ruxsat bering."),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ To'ladi - ruxsat berish", callback_data=f"paid:{user.id}")]]))
+    except TelegramError as exc:
+        logger.warning("Egasiga to'lov xabari yuborilmadi: %s", exc)
+
+
+async def on_paid_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """paid:<id> - ruxsat berish, unpaid:<id> - ruxsatni olish (faqat super admin)."""
+    query = update.callback_query
+    if not admins.is_superadmin(query.from_user.id):
+        await query.answer("Bu tugma faqat bot egasi uchun.", show_alert=True)
+        return
+    await query.answer()
+    action, _, raw = query.data.partition(":")
+    await _set_paid(context, int(raw), action == "paid", query=query)
+
+
+async def _set_paid(context, target: int, grant: bool, query=None, message=None) -> None:
+    if grant:
+        changed = admins.add_paid(target)
+        text = f"{target} - ruxsat berildi ✅" if changed else f"{target} ga allaqachon ruxsat berilgan."
+        if changed:
+            try:
+                await context.bot.send_message(
+                    target, "✅ To'lovingiz qabul qilindi - endi botdan cheklovsiz foydalanishingiz mumkin.\n"
+                            "Keyingi bobning PDF faylini yoki rasmlarini yuboring.")
+            except TelegramError:
+                text += " (unga xabar yetib bormadi)"
+    else:
+        changed = admins.remove_paid(target)
+        text = f"{target} - ruxsat olib tashlandi 🚫" if changed else f"{target} ruxsat berilganlar ro'yxatida yo'q."
+    if query is not None:
+        await query.edit_message_text(text)
+    elif message is not None:
+        await message.reply_text(text)
+
+
+async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ruxsat <id> - ruxsat berish, /ruxsat - ro'yxat; /ruxsatolish <id> - olib tashlash."""
+    if not admins.is_superadmin(update.effective_user.id):
+        await update.effective_message.reply_text("Bu buyruq faqat bot egasi uchun.")
+        return
+    grant = (update.effective_message.text or "").split()[0].lower().startswith("/ruxsat") and \
+        not (update.effective_message.text or "").lower().startswith("/ruxsatolish")
+    if context.args and context.args[0].isdigit():
+        await _set_paid(context, int(context.args[0]), grant, message=update.effective_message)
+        return
+    if not grant:
+        await update.effective_message.reply_text("Foydalanish: /ruxsatolish <id>")
+        return
+    await paid_list_cmd(update, context)
+
+
+async def paid_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not admins.is_superadmin(update.effective_user.id):
+        return
+    ids = admins.list_paid()
+    lines, buttons = [], []
+    for i in ids:
+        label = str(i)
+        try:
+            chat = await context.bot.get_chat(i)
+            label = chat.full_name or chat.username or str(i)
+        except TelegramError:
+            pass
+        lines.append(f"• {label} ({i})")
+        buttons.append([InlineKeyboardButton(f"🚫 {label} - ruxsatni olish", callback_data=f"unpaid:{i}")])
+    await update.effective_message.reply_text(
+        "💳 To'lov qilib, ruxsat olganlar:\n" + ("\n".join(lines) or "Hozircha hech kim.") +
+        "\n\nQo'shish: /ruxsat <id>  (yoki bepul bobi tugaganda keladigan tugma)\n"
+        "Olib tashlash: /ruxsatolish <id>",
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
 
 
 def _refund(job: dict) -> None:
@@ -1047,6 +1142,8 @@ def _build_app(token: str) -> Application:
     app.add_handler(CommandHandler("addadmin", add_admin_cmd))
     app.add_handler(CommandHandler("removeadmin", remove_admin_cmd))
     app.add_handler(CommandHandler("qoida", rules_cmd))
+    app.add_handler(CommandHandler("ruxsat", paid_cmd))
+    app.add_handler(CommandHandler("ruxsatolish", paid_cmd))
     app.add_handler(CommandHandler("qoidaochir", remove_rule_cmd))
     app.add_handler(MessageHandler(
         filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, handle_photo))
@@ -1054,6 +1151,7 @@ def _build_app(token: str) -> Application:
     app.add_handler(MessageHandler(~filters.COMMAND, handle_other))
     app.add_handler(CallbackQueryHandler(on_queue_button, pattern=r"^qcancel:"))
     app.add_handler(CallbackQueryHandler(on_menu_button, pattern=r"^m:"))
+    app.add_handler(CallbackQueryHandler(on_paid_button, pattern=r"^(paid|unpaid):\d+$"))
     app.add_handler(CallbackQueryHandler(on_rule_delete, pattern=r"^rdel:\d+$"))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^(allow|deny|remove):"))
     app.add_error_handler(on_error)

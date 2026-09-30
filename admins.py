@@ -147,3 +147,33 @@ def add_used(user_id: int, delta: int = 1) -> None:
     else:
         used.pop(str(user_id), None)
     _save(data)
+
+
+# TO'LOV QILGANLAR (2026-10-01): bepul bobdan keyin egasiga to'lab, ruxsat olgan
+# foydalanuvchilar - cheklovsiz tarjima, lekin admin huquqi (qoidalar, adminlar) YO'Q.
+def is_paid(user_id: int) -> bool:
+    return user_id in _load().get("paid", [])
+
+
+def list_paid() -> list[int]:
+    return list(_load().get("paid", []))
+
+
+def add_paid(user_id: int) -> bool:
+    data = _load()
+    paid = data.setdefault("paid", [])
+    if user_id in paid:
+        return False
+    paid.append(user_id)
+    _save(data)
+    return True
+
+
+def remove_paid(user_id: int) -> bool:
+    data = _load()
+    paid = data.get("paid", [])
+    if user_id not in paid:
+        return False
+    paid.remove(user_id)
+    _save(data)
+    return True
