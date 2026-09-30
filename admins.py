@@ -1,0 +1,92 @@
+import json
+import logging
+import os
+import urllib.request
+
+from config import ADMINS_FILE, OWNER_ID
+
+# Hugging Face Space'da disk qayta ishga tushganda tozalanadi - shuning uchun
+# ro'yxat Cloudflare'da (manhwa-gate /admins) ham saqlanadi. Bo'sh bo'lsa -
+# faqat mahalliy fayl (telefon, noutbuk).
+ADMINS_URL = os.getenv("ADMINS_URL", "")
+GATE_KEY = os.getenv("GATE_KEY", "")
+
+
+def _remote(method: str, body: bytes | None = None) -> dict | None:
+    req = urllib.request.Request(ADMINS_URL, data=body, method=method,
+                                 headers={"x-key": GATE_KEY, "content-type": "application/json",
+                                          "user-agent": "manhwa-bot/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode("utf-8") or "null")
+
+
+def pull_remote() -> None:
+    """Ishga tushganda: saqlangan ro'yxatni Cloudflare'dan olib, faylga yozadi."""
+    if not ADMINS_URL:
+        return
+    try:
+        data = _remote("GET")
+        if data and "admins" in data:
+            with open(ADMINS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Adminlar ro'yxati olinmadi: %s", exc)
+
+
+def _load() -> dict:
+    if not ADMINS_FILE.exists():
+        data = {"admins": [OWNER_ID]}
+        _save(data)
+        return data
+    with open(ADMINS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save(data: dict) -> None:
+    with open(ADMINS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    if ADMINS_URL:
+        try:
+            _remote("PUT", json.dumps(data).encode("utf-8"))
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Adminlar ro'yxati saqlanmadi: %s", exc)
+
+
+def is_allowed(user_id: int) -> bool:
+    return user_id == OWNER_ID or user_id in _load()["admins"]
+
+
+def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID
+
+
+def is_superadmin(user_id: int) -> bool:
+    """Super admin: adminlarni boshqaradi, navbatdagi istalgan ishni bekor qiladi.
+
+    Bot egasi (OWNER_ID) doim super admin - uni olib bo'lmaydi.
+    """
+    return user_id == OWNER_ID or user_id in _load().get("superadmins", [])
+
+
+def list_admins() -> list[int]:
+    return _load()["admins"]
+
+
+def add_admin(user_id: int) -> bool:
+    data = _load()
+    if user_id in data["admins"]:
+        return False
+    data["admins"].append(user_id)
+    _save(data)
+    return True
+
+
+def remove_admin(user_id: int) -> bool:
+    if user_id == OWNER_ID:
+        return False
+    data = _load()
+    if user_id not in data["admins"]:
+        return False
+    data["admins"].remove(user_id)
+    _save(data)
+    return True
