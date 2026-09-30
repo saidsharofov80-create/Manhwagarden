@@ -148,6 +148,84 @@ _INTERJ = {
 }
 
 
+_INTERJ.update({
+    # koreyscha murojaatlar (skanlatsiyada tarjimasiz qoladi; Google "Noona" -> "Kunduzi")
+    "hyung": "Aka", "oppa": "Aka", "noona": "Opa", "nuna": "Opa", "unni": "Opa", "eonni": "Opa",
+    "tch": "Tss", "tsk": "Tss",
+})
+
+
+# ---------------------------------------------------------------- manhwa atamalari
+# Foydalanuvchilar sifatdan norozi (2026-09-30). Google manhwa murojaatlarini xato beradi:
+# "My lord" -> "Rabbim" (= Xudoyim!), "Young master" -> "Yosh usta", "butler" tarjimasiz,
+# "Big brother" -> "Katta uka", "You brat!" -> "Siz janob!". Tuzatish: asl (inglizcha) matnda
+# atama bo'lsa, Google chiqargan aniq noto'g'ri so'z almashtiriladi - o'zbekcha qo'shimcha
+# saqlanadi ("Butlerga" -> "Xizmatkorga"). Har bir juftlik Google'da tekshirilgan.
+_EN_PRE = [                     # Google'ga yuborishdan oldin (inglizcha)
+    (r"\bbrats?\b", "kid"),
+    (r"\bmilord\b", "my lord"),
+    (r"\bmy lady\b", "milady"),
+    (r"\b(hyung|oppa)\b", "big brother"),
+    (r"\b(noona|nuna|unni|eonni)\b", "big sister"),
+]
+_UZ_POST = [                    # (asl matn sharti, Google natijasidagi xato, to'g'risi)
+    (r"\bbutler", r"\b(butler|sotuvchi)", "xizmatkor"),
+    (r"\byoung master", r"\byosh usta", "yosh xo'jayin"),
+    (r"\bmy lord", r"\b(rabbim|lordim)", "hazratim"),
+    (r"\bbig brother", r"\bkatta (uka|aka)", "aka"),
+    (r"\bbig sister", r"\bkatta (opa|singil)", "opa"),
+    (r"\bduke", r"\bdyuk", "gersog"),
+    (r"\bguild master", r"\bgildiya ustasi", "gildiya boshlig'i"),
+    (r"\byou (kid|brat)", r"\bseni bolam", "sen bola"),
+    (r"\bmiss\b", r"\bmiss (\w+)", r"\1 xonim"),
+]
+
+
+def _fix_english(text: str) -> str:
+    for pat, rep in _EN_PRE:
+        text = re.sub(pat, rep, text, flags=re.I)
+    return _split_glued(text)
+
+
+def _fix_uzbek(english: str, uzbek: str) -> str:
+    for cond, wrong, right in _UZ_POST:
+        if re.search(cond, english or "", flags=re.I):
+            uzbek = re.sub(wrong, right, uzbek, flags=re.I)
+    return uzbek
+
+
+# OCR qatordagi bo'sh joyni yo'qotadi: "KIND OFDRIVE", "TELLME" - Google tushunmaydi.
+# wordninja ingliz so'z chastotasi bo'yicha ajratadi, lekin ismlarni buzadi ("rutiger" ->
+# "ru tiger") - shuning uchun faqat lug'atda YO'Q so'z, bo'laklari lug'atda BOR va qisqa
+# bo'laklar faqat keng tarqalgan so'zlar bo'lsa ajratiladi.
+_NO_SPLIT = {"manhwa", "manhua", "webtoon", "sunbae", "seonbae", "hyung", "noona", "oppa",
+             "unni", "eonni", "ahjussi", "ajussi", "nassau"}
+_SHORT_OK = {"of", "me", "to", "in", "it", "is", "my", "we", "he", "up", "on", "at",
+             "so", "no", "do", "go", "be", "an", "or", "us", "by", "am", "if", "as"}
+
+
+def _split_glued(text: str) -> str:
+    try:
+        import wordninja
+    except ImportError:
+        return text
+    known = wordninja.DEFAULT_LANGUAGE_MODEL._wordcost
+
+    def fix(m):
+        tok = m.group(0)
+        low = tok.lower()
+        # "hahaha", "aaargh" kabi takroriy undovlar ham bo'linmaydi ("ha aha" bo'lib qolardi)
+        if len(low) < 5 or low in known or low in _NO_SPLIT or len(set(low)) <= 3:
+            return tok
+        parts = wordninja.split(low)
+        if len(parts) < 2 or any(p not in known or (len(p) < 3 and p not in _SHORT_OK) for p in parts):
+            return tok
+        joined = " ".join(parts)
+        return joined.upper() if tok.isupper() else joined
+
+    return re.sub(r"[A-Za-z]+", fix, text)
+
+
 def _interjection(source: str) -> str | None:
     t = re.sub(r"\b([^\W\d_]{1,2})-(?=\1)", "", source or "", flags=re.I)
     m = re.fullmatch(r"\W*([A-Za-z]+)(\W*)", t)
@@ -296,10 +374,11 @@ def _google_pivot(texts: list[str]) -> tuple[list[str] | None, list[str] | None]
     if first is None:
         return None, None
     english = [src if lang == "en" else (tr or src) for src, (tr, lang) in zip(texts, first)]
+    english = [_fix_english(e) for e in english]
     second = _google_many(english, "en", "uz")
     if second is None:
         return None, english
-    return [tr for tr, _ in second], english
+    return [_fix_uzbek(e, tr) for e, (tr, _) in zip(english, second)], english
 
 
 # ---------------------------------------------------------------- zaxiralar
