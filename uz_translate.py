@@ -68,6 +68,8 @@ def normalize_source(text: str) -> str:
         t = re.sub(r"\bi\b", "I", t)
         t = re.sub(r"\bi'", "I'", t)
     t = re.sub(r"([!?.])\1{3,}", r"\1\1\1", t)
+    # OCR ko'p nuqtaning bittasini yo'qotadi: "CHECK.." -> "CHECK..."
+    t = re.sub(r"(?<!\.)\.\.(?!\.)", "...", t)
     return t
 
 
@@ -132,6 +134,30 @@ _SFX = {
 }
 
 
+# Undov so'zlari: Google "HUH?" ni "HU?" qilib qo'yardi (haqiqiy bob).
+# Kalit - takroriy harflarsiz ("hmmm" -> "hm", "wheeew" -> "whew").
+_INTERJ = {
+    "huh": "A", "hm": "Hm", "mm": "Mm", "hmph": "Hmf", "whew": "Uf", "phew": "Uf",
+    "ugh": "Ux", "tsk": "Tss", "eh": "E", "oh": "O", "ah": "A", "uh": "E", "um": "Mm",
+    "wow": "Voy", "whoa": "Voy", "ouch": "Voy", "oops": "Voy", "hey": "Hoy", "ha": "Ha",
+    "haha": "Haha", "hahaha": "Hahaha", "heh": "He", "hehe": "Hehe", "argh": "Aaa",
+    "aargh": "Aaa", "gah": "Aah", "huhu": "Huhu",
+}
+
+
+def _interjection(source: str) -> str | None:
+    t = re.sub(r"\b([^\W\d_]{1,2})-(?=\1)", "", source or "", flags=re.I)
+    m = re.fullmatch(r"\W*([A-Za-z]+)(\W*)", t)
+    if not m:
+        return None
+    word = re.sub(r"(.)\1+", r"\1", m.group(1).lower())
+    word2 = re.sub(r"(.)\1{2,}", r"\1\1", m.group(1).lower())
+    base = _INTERJ.get(m.group(1).lower()) or _INTERJ.get(word2) or _INTERJ.get(word)
+    if not base:
+        return None
+    return base + m.group(2).strip()
+
+
 def _sfx_uzbek(english: str | None) -> str | None:
     if not english:
         return None
@@ -158,7 +184,34 @@ def clean_uzbek(text: str) -> str:
     t = t.replace("ʻ", "'").replace("ʼ", "'").replace("‘", "'").replace("’", "'")
     t = t.replace("`", "'")
     t = re.sub(r"\s+", " ", t)
+    # Google ba'zan tinish belgisidan oldin bo'sh joy qo'yadi: "kerak ..." -> "kerak..."
+    t = re.sub(r"\s+([.,!?…:;])", r"\1", t)
     return t
+
+
+# Duduqlanish: "C-CLEAR THE WAY!" -> Google "C - yo'lni bo'shating!" qilardi.
+# Tarjimadan oldin olib tashlanadi, keyin o'zbekcha so'zning bosh harfi bilan
+# qaytariladi: "Y-yo'lni bo'shating!"
+_STUTTER = re.compile(r"\b([^\W\d_]{1,2})-(?=\1)", re.IGNORECASE | re.UNICODE)
+
+
+def split_stutter(text: str) -> tuple[str, bool]:
+    t = (text or "").strip()
+    first = _STUTTER.match(t) is not None
+    return _STUTTER.sub("", t), first
+
+
+def add_stutter(uzbek: str) -> str:
+    for i, c in enumerate(uzbek):
+        if c.isalpha():
+            return uzbek[:i] + c.upper() + "-" + c.lower() + uzbek[i + 1:]
+    return uzbek
+
+
+def _same(a: str, b: str) -> bool:
+    """Tarjima asl matnning o'zimi (Google tarjima qilmay qaytargan)."""
+    k = lambda x: re.sub(r"[^\w]", "", (x or "").lower())
+    return bool(k(a)) and k(a) == k(b)
 
 
 # ---------------------------------------------------------------- Google
@@ -320,7 +373,8 @@ def translate_many(texts: list[str]) -> list[str]:
     Tarjima qilib bo'lmagan matn aslicha qaytadi - bot hech qachon bo'sh
     pufakcha chizmaydi.
     """
-    norm = [normalize_source(t) for t in texts]
+    stut = [split_stutter(t) for t in texts]
+    norm = [normalize_source(t) for t, _ in stut]
     result: list[str | None] = [None] * len(norm)
 
     todo: list[int] = []
@@ -329,6 +383,8 @@ def translate_many(texts: list[str]) -> list[str]:
             result[i] = ""
         elif not _HAS_LETTER.search(t):
             result[i] = t                       # "...", "?!" - o'zgarmaydi
+        elif _interjection(t):
+            result[i] = _interjection(t)       # "HUH?" -> "A?" (lug'atdan)
         elif t in _cache:
             result[i] = _cache[t]
         else:
@@ -344,6 +400,14 @@ def translate_many(texts: list[str]) -> list[str]:
             for k, i in enumerate(todo):
                 if uz[k] and uz[k].strip():
                     result[i] = uz[k]
+        # Tarjima qilinmay qaytgan inglizcha ("Messenger!" - Google uni ilova nomi
+        # deb o'ylaydi, "Greenhorn") - kichik harf bilan qayta so'raymiz: "xabarchi!"
+        again = [i for i in todo if result[i] and english[i] and _same(result[i], english[i])]
+        if again:
+            retry = _google_many([english[i].lower() for i in again], "en", "uz")
+            for i, got in zip(again, retry or []):
+                if got and got[0].strip() and not _same(got[0], english[i]):
+                    result[i] = got[0]
         # Tovush effektlari - lug'atdan (ot sifatidagi tarjima o'rniga)
         for i in todo:
             sfx = _sfx_uzbek(english[i])
@@ -370,6 +434,8 @@ def translate_many(texts: list[str]) -> list[str]:
         if i in todo and result[i]:
             r = capitalize_first(t, restore_punctuation(t, r))
             _cache[t] = r
+        if stut[i][1] and r:
+            r = add_stutter(r)
         final.append(r)
     return final
 

@@ -275,9 +275,23 @@ def _read_fast_tiled(image, budget: dict | None) -> list[dict]:
     collected.sort(key=lambda it: -it.get("score", 0.0))
     kept: list[dict] = []
     for item in collected:
-        if all(_iou(item["bbox"], k["bbox"]) <= 0.5 for k in kept):
+        if all(_iou(item["bbox"], k["bbox"]) <= 0.5 and _inside(item["bbox"], k["bbox"]) <= 0.6
+               for k in kept):
             kept.append(item)
     return kept
+
+
+def _inside(a, b) -> float:
+    """Kichikroq qutining qancha qismi ikkinchisi bilan ustma-ust (0..1).
+
+    Bo'lak chegarasida yarmi kesilgan qator o'z qutisini faqat ko'rinib turgan
+    qismga toraytiradi va chetga tegmaydi - IoU kichik chiqib, u saqlanib qolardi.
+    Haqiqiy bobda "THINK." shu tarzda ikkinchi marta "TUIMIV" bo'lib o'qilgan.
+    """
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return ix * iy / small if small > 0 else 0.0
 
 
 def _read(image, reader) -> list[dict]:

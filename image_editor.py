@@ -13,6 +13,7 @@ Ikki nozik joyi bor (sinovda ko'rilgan nuqsonlar shu yerda tuzatilgan):
 """
 
 import logging
+import os
 import re
 from collections import Counter
 from functools import lru_cache
@@ -27,7 +28,13 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 
+# Komiks shrifti (Shantell Sans Bold Italic, OFL): skanlatsiyalardagi qo'lda
+# yozilgandek qiya harflarga o'xshaydi. Foydalanuvchi fikri (2026-09-30):
+# "shriftni to'g'rilash kerak" - Montserrat oddiy sayt shrifti edi.
+# Boshqasini FONT_FILE muhit o'zgaruvchisi bilan berish mumkin.
 FONT_CANDIDATES = [
+    os.getenv("FONT_FILE", ""),
+    BASE_DIR / "assets" / "fonts" / "ShantellSans-BoldItalic.ttf",
     BASE_DIR / "assets" / "fonts" / "Montserrat-Bold.ttf",
     r"C:\Windows\Fonts\DejaVuSans-Bold.ttf",
     r"C:\Windows\Fonts\arialbd.ttf",
@@ -41,6 +48,8 @@ _MIN_SPAN = 4           # qatordagi eng kichik to'ldiriladigan kenglik
 @lru_cache(maxsize=64)
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
     for path in FONT_CANDIDATES:
+        if not path:
+            continue
         try:
             return ImageFont.truetype(str(path), size)
         except OSError:
@@ -178,7 +187,7 @@ def _fill_bubble(arr: np.ndarray, box: tuple[int, int, int, int],
     bx1, by1, bx2, by2 = box
     bw, bh = bx2 - bx1, by2 - by1
     if bw <= 0 or bh <= 0:
-        return box, 0
+        return box, 0, None
 
     # Qidiruv oynasi matn qutisidan KENGROQ: tezkor OCR faqat matnni o'raydi,
     # pufakcha esa undan ancha katta. Pufakcha to'liq topilsa, tarjima uchun
@@ -217,6 +226,7 @@ def _fill_bubble(arr: np.ndarray, box: tuple[int, int, int, int],
     # kesilib, tutash pufakchalarda oq to'rtburchak paydo bo'lardi.
     fill = _with_holes(region, clipped=(x1 == 0, y1 == 0, x2 == W, y2 == H))
     sub[fill] = bg
+    shape = (x1, y1, fill)          # pufakcha shakli - matnni shu shaklga moslab yozish uchun
 
     # Matn uchun joy: faqat SHU matn atrofidagi (vertikal tasma) va uning ostidagi
     # uzluksiz bo'lak. Butun hudud olinsa, tutash ikki pufakchada ikkala tarjima
@@ -232,15 +242,15 @@ def _fill_bubble(arr: np.ndarray, box: tuple[int, int, int, int],
 
     widths = [s[1] - s[0] for s in spans if s]
     if not widths:
-        return box, touched
+        return box, touched, shape
     limit = max(widths) * 0.78
     rows = [i for i, s in enumerate(spans) if s and (s[1] - s[0]) >= limit]
     if not rows:
-        return box, touched
+        return box, touched, shape
     inner_x1 = max(spans[i][0] for i in rows)
     inner_x2 = min(spans[i][1] for i in rows)
     if inner_x2 - inner_x1 < _MIN_SPAN:
-        return box, touched
+        return box, touched, shape
     # Matn pufakcha chetiga tegib qolmasligi uchun kichik zaxira
     inset = int((inner_x2 - inner_x1) * 0.05)
     inner = (x1 + inner_x1 + inset, y1 + rows[0], x1 + inner_x2 - inset, y1 + rows[-1] + 1)
@@ -250,7 +260,7 @@ def _fill_bubble(arr: np.ndarray, box: tuple[int, int, int, int],
     # Faqat ENI bo'yicha: balandlik bo'yicha qo'shilganda notekis chetlarda matn
     # pufakcha chizig'iga tegib qolardi ("yashil shox!").
     inner = (min(inner[0], bx1), inner[1], max(inner[2], bx2), inner[3])
-    return inner, touched
+    return inner, touched, shape
 
 
 def _run_under(row: np.ndarray, tx1: int, tx2: int) -> tuple[int, int] | None:
@@ -386,6 +396,120 @@ def _draw_block(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text:
         cur_y += lh
 
 
+def mostly_upper(text: str) -> bool:
+    """Asl yozuv KATTA harflardami (ingliz skanlatsiyalarida odatiy)."""
+    letters = [c for c in text or "" if c.isalpha() and c.isascii()]
+    return len(letters) >= 2 and sum(c.isupper() for c in letters) / len(letters) > 0.8
+
+
+def display_text(text: str, upper: bool) -> str:
+    """Rasmga yoziladigan ko'rinish: to'g'ri o'zbek belgilari va asl yozuv uslubi.
+
+    o'/g' -> o‘/g‘ (U+2018, o'zbek imlosi), tutuq belgisi -> U+2019.
+    Asl yozuv katta harfda bo'lsa, tarjima ham katta harfda (skanlatsiya uslubi).
+    """
+    t = re.sub(r"([OoGg])'", r"\1‘", text)
+    t = t.replace("'", "’")
+    return t.upper() if upper else t
+
+
+def _shape_depth(shape) -> np.ndarray:
+    """Pufakcha ichidagi har nuqtaning chetgacha masofasi (px). Bir marta hisoblanadi,
+    keyin istalgan zaxira (margin) uchun `depth > margin` - arzon."""
+    fill = shape[2].astype(np.uint8)
+    try:
+        import cv2
+
+        return cv2.distanceTransform(fill, cv2.DIST_L2, 3)
+    except ImportError:
+        return fill.astype(np.float32) * 1e6
+
+
+def _span_at(mask: np.ndarray, r0: int, r1: int, cx: int) -> tuple[int, int] | None:
+    """[r0, r1) qatorlarining HAMMASIDA ichkarida bo'lgan, cx atrofidagi uzluksiz oraliq."""
+    h, w = mask.shape
+    if r0 < 0 or r1 > h or r1 <= r0:
+        return None
+    rows = mask[r0:r1].all(axis=0)
+    if not rows.any():
+        return None
+    cx = min(max(cx, 0), w - 1)
+    if not rows[cx]:
+        idx = np.flatnonzero(rows)
+        cx = int(idx[np.abs(idx - cx).argmin()])
+    a = cx
+    while a > 0 and rows[a - 1]:
+        a -= 1
+    b = cx
+    while b + 1 < w and rows[b + 1]:
+        b += 1
+    return a, b + 1
+
+
+def _layout_in_shape(draw, text: str, mask: np.ndarray, cx: int, cy: int, size: int):
+    """Berilgan o'lchamda matnni pufakcha shakliga moslab qatorlarga bo'ladi.
+
+    Har qatorning eni - pufakchaning AYNAN o'sha balandlikdagi eni (dumaloq
+    pufakchada o'rtadagi qatorlar keng, yuqori/pastki qatorlar tor). Blok asl
+    matn markazida turadi. Sig'masa - None.
+    """
+    font = _load_font(size)
+    lh = _line_height(font)
+    words = text.split()
+    if not words:
+        return None
+    h = mask.shape[0]
+    for n in range(1, len(words) + 1):
+        total = lh * n
+        if total > h:
+            return None
+        top = int(min(max(cy - total / 2, 0), h - total))
+        lines, spans, k = [], [], 0
+        for i in range(n):
+            span = _span_at(mask, top + i * lh, top + (i + 1) * lh, cx)
+            if span is None:
+                break
+            limit = span[1] - span[0]
+            cur = ""
+            while k < len(words):
+                trial = (cur + " " + words[k]).strip()
+                if draw.textlength(trial, font=font) <= limit:
+                    cur, k = trial, k + 1
+                else:
+                    break
+            if not cur:
+                break
+            lines.append(cur)
+            spans.append(span)
+        if k == len(words) and len(lines) == n:
+            return font, lines, spans, top, lh
+        # Bu n da sig'madi - ko'proq qator bilan urinib ko'ramiz
+    return None
+
+
+def _draw_in_shape(draw, shape, text_box, text: str, color, max_size: int | None) -> bool:
+    """Matnni pufakcha SHAKLIGA moslab, asl matn joyiga yozadi. Bo'lmasa False."""
+    ox, oy, _ = shape
+    tx1, ty1, tx2, ty2 = text_box
+    depth = _shape_depth(shape)
+    start = max_size or 60
+    for size in range(max(10, start), 9, -1):
+        mask = depth > max(3, size // 3)       # matn pufakcha chizig'iga tegmasin
+        if not mask.any():
+            continue
+        cx, cy = (tx1 + tx2) // 2 - ox, (ty1 + ty2) // 2 - oy
+        got = _layout_in_shape(draw, text, mask, cx, cy, size)
+        if not got:
+            continue
+        font, lines, spans, top, lh = got
+        for i, (line, (a, b)) in enumerate(zip(lines, spans)):
+            w = draw.textlength(line, font=font)
+            x = min(max(cx - w / 2, a), b - w)
+            draw.text((ox + x, oy + top + i * lh), line, font=font, fill=color)
+        return True
+    return False
+
+
 def _inpaint_text(arr: np.ndarray, box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
     """Rasm/fon ustidagi harflarni "bo'yab" o'chiradi (OpenCV inpaint).
 
@@ -479,6 +603,8 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
         if x2 - x1 <= 2 or y2 - y1 <= 2:
             continue
         box = (x1, y1, x2, y2)
+        upper = mostly_upper(item.get("original") or "")
+        uzbek_text = display_text(uzbek_text, upper)
         line_h = item.get("line_h")
         # Shrift asl harf o'lchamidan oshmasin. OCR qutisi harfdan ~25% baland
         # (bo'shliqlar bilan), shuning uchun 0.8: 0.95 da haqiqiy bobda tarjima
@@ -493,7 +619,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
         before = _ink(arr, box, bg_color)
         filled = _fill_bubble(arr, box, bg_color)
         if filled is not None:
-            inner, touched = filled
+            inner, touched, shape = filled
             if touched:
                 inner = _limit_area(inner, box)
             # O'Z-O'ZINI TEKSHIRISH: asl harflar haqiqatan o'childimi? Qaysi sabab
@@ -505,7 +631,7 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
                 logger.info("Asl yozuv to'liq o'chmadi (%.0f%% qoldi) - qayta o'chirilmoqda",
                             100 * after / before)
                 _erase_ink(arr, box, bg_color)
-            jobs.append(("bubble", inner, bg_color, uzbek_text, max_size))
+            jobs.append(("bubble", inner, bg_color, uzbek_text, max_size, shape, box, upper))
         else:
             area = _inpaint_text(arr, box)
             jobs.append(("art", area, None, uzbek_text, max_size))
@@ -515,9 +641,13 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
     # 2-bosqich: yozish
     out = Image.fromarray(arr)
     draw = ImageDraw.Draw(out)
-    for mode, box, bg_color, text, extra in jobs:
+    for job in jobs:
+        mode, box, bg_color, text, extra = job[:5]
         if mode == "bubble":
-            _draw_block(draw, box, text, _text_color_for(bg_color), max_size=extra)
+            color = _text_color_for(bg_color)
+            shape, tbox = job[5], job[6]
+            if shape is None or not _draw_in_shape(draw, shape, tbox, text, color, extra):
+                _draw_block(draw, box, text, color, max_size=extra)
         elif mode == "art":
             # Rasm ustida o'qilishi uchun: fon yorug' bo'lsa qora matn oq kontur bilan,
             # qorong'i bo'lsa aksincha
@@ -581,8 +711,10 @@ def _merge_same_bubble(jobs: list) -> list:
             for k, prev in enumerate(out):
                 if prev[0] == "bubble" and _box_iou(prev[1], job[1]) > 0.5:
                     sizes = [s for s in (prev[4], job[4]) if s]
+                    tb = (min(prev[6][0], job[6][0]), min(prev[6][1], job[6][1]),
+                          max(prev[6][2], job[6][2]), max(prev[6][3], job[6][3]))
                     out[k] = ("bubble", prev[1], prev[2], prev[3] + " " + job[3],
-                              min(sizes) if sizes else None)
+                              min(sizes) if sizes else None, prev[5], tb, prev[7])
                     break
             else:
                 out.append(job)
