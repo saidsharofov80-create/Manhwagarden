@@ -57,6 +57,8 @@ _MIN_SPAN = 4           # qatordagi eng kichik to'ldiriladigan kenglik
 #   box    (to'rtburchak - hikoya/tizim oynasi) - Comic Neue Bold Italic
 #   shout  (tikanli/portlovchi - baqiriq) - Bangers
 #   art    (pufakchasiz, rasm ustidagi yozuv) - Shantell Sans Bold Italic
+#   system (to'q/rangli fonda OCH yozuv - "C-RANK HUNTER" kabi tizim/holat oynasi)
+#          - PT Sans Narrow Bold (asl oynalardagi tor, qalin shriftga yaqin)
 # Hammasi OFL (Digital Strip'dan tashqari) va o'zbekcha o‘/g‘ belgilari bor.
 FONT_STYLES = os.getenv("FONT_STYLES", "") == "1"
 _FONTS_DIR = BASE_DIR / "assets" / "fonts"
@@ -64,6 +66,7 @@ STYLE_FONTS = {
     "box": _FONTS_DIR / "ComicNeue-BoldItalic.ttf",
     "shout": _FONTS_DIR / "Bangers-Regular.ttf",
     "art": _FONTS_DIR / "ShantellSans-BoldItalic.ttf",
+    "system": _FONTS_DIR / "PTSansNarrow-Bold.ttf",
 }
 _style = threading.local()       # hozir chizilayotgan matn uslubi (sahifalar parallel bo'lishi mumkin)
 
@@ -834,6 +837,37 @@ def _draw_sfx_label(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], t
               stroke_width=max(2, size // 8), stroke_fill=(0, 0, 0))
 
 
+def _system_ink(arr: np.ndarray, box: tuple[int, int, int, int],
+                bg: tuple[int, int, int]) -> tuple[int, int, int] | None:
+    """To'q yoki rangli fonda OCH yozuv (tizim/holat oynasi) bo'lsa - yozuv rangi, aks holda None.
+
+    Haqiqiy bobda ("C-RANK HUNTER / KIM JIMIN", ko'k naqshli oyna) bunday oyna pufakcha
+    deb topilib, naqshi ustidan och ko'k yamoq bilan bo'yalgan edi.
+    """
+    lum = lambda c: (c[..., 0] * 299 + c[..., 1] * 587 + c[..., 2] * 114) / 1000
+    x1, y1, x2, y2 = box
+    # Fon - quti atrofidagi halqaning medianasi. Naqshli oynada _bg_around None beradi,
+    # zich oq yozuvli qutida esa "eng ko'p rang" yozuvning o'zi chiqadi (och ko'k).
+    H, W = arr.shape[:2]
+    p = 10
+    ring = np.concatenate([
+        arr[max(0, y1 - p):y1, x1:x2].reshape(-1, 3), arr[y2:min(H, y2 + p), x1:x2].reshape(-1, 3),
+        arr[y1:y2, max(0, x1 - p):x1].reshape(-1, 3), arr[y1:y2, x2:min(W, x2 + p)].reshape(-1, 3)])
+    if len(ring) >= 20:
+        bg = tuple(np.median(ring, axis=0))
+    bgl = float(lum(np.array(bg, np.float32)))
+    if bgl > 130:
+        return None
+    sub = arr[y1:y2, x1:x2].astype(np.float32)
+    if sub.size == 0:
+        return None
+    bright = lum(sub) > bgl + 90
+    if bright.mean() < 0.04:
+        return None
+    ink = np.median(sub[bright], axis=0)
+    return tuple(int(v) for v in ink)
+
+
 def _bubble_style(shape, touched: int) -> str:
     """Pufakcha shakli: 'box' (to'rtburchak), 'shout' (tikanli) yoki 'speech' (oval).
 
@@ -857,8 +891,18 @@ def _bubble_style(shape, touched: int) -> str:
             return "speech"
         hull = cv2.convexHull(c)
         jag = cv2.arcLength(c, True) / max(1.0, cv2.arcLength(hull, True))
-        solid = area / max(1.0, cv2.contourArea(hull))
-        if jag > 1.2 or solid < 0.8:
+        spikes = 0
+        idx = cv2.convexHull(c, returnPoints=False)
+        if idx is not None and len(idx) > 3:
+            try:
+                defects = cv2.convexityDefects(c, idx)
+            except cv2.error:
+                defects = None
+            if defects is not None:
+                deep = max(4.0, 0.04 * min(w, h)) * 256      # chuqurlik 1/256 px da
+                spikes = int((defects.reshape(-1, 4)[:, 3] > deep).sum())
+        # oddiy pufakcha: dum 1-2 chuqurcha; tikanli pufakcha - 8+ tish
+        if spikes >= 8 and jag > 1.12:
             return "shout"
         if not touched and area / (w * h) >= 0.9:
             return "box"
@@ -914,6 +958,13 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
         if RENDER_V2:
             bg_color = _bg_around(arr, box, line_h) or bg_color
             ink_color = _ink_color(arr, box, bg_color)
+        if FONT_STYLES:
+            sys_ink = _system_ink(arr, box, bg_color)
+            if sys_ink:
+                # naqshli fon saqlanadi: faqat harflar o'chiriladi, o'z shriftida yoziladi
+                area = _inpaint_text(arr, box)
+                jobs.append(("system", area, bg_color, uzbek_text, max_size, sys_ink))
+                continue
         before = _ink(arr, box, bg_color)
         filled = _fill_bubble(arr, box, bg_color)
         if filled is not None:
@@ -954,6 +1005,9 @@ def render_translation(image_bytes: bytes, translations: list[dict], quality: in
             shape, tbox = job[5], job[6]
             if shape is None or not _draw_in_shape(draw, shape, tbox, text, color, extra):
                 _draw_block(draw, box, text, color, max_size=extra)
+        elif mode == "system":
+            dark = tuple(int(v * 0.35) for v in bg_color)
+            _draw_block(draw, box, text, job[5], max_size=extra, stroke=dark, pad=2)
         elif mode == "art":
             # Rasm ustida o'qilishi uchun: fon yorug' bo'lsa qora matn oq kontur bilan,
             # qorong'i bo'lsa aksincha
