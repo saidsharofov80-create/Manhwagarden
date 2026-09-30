@@ -18,7 +18,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v1
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v2
       - name: O'rnatish
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
