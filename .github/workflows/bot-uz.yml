@@ -1,0 +1,39 @@
+name: bot-uz
+# @Manhwatarjimauz_BOT - kod @gardenhwa_bot bilan bir xil, faqat token/darvoza boshqa.
+# Darvoza: manhwa-gate-uz.compass-crm.workers.dev (manhwa-gate/wrangler.uz.toml)
+on:
+  workflow_dispatch:
+concurrency:
+  group: bot-uz
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Kutubxonalar (keshdan)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-v2
+      - name: O'rnatish
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+          BOT_TOKEN=x OWNER_ID=1 .venv/bin/python -c "import fast_ocr; fast_ocr.warm_up()"
+      - name: Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN_UZ }}
+          OWNER_ID: ${{ secrets.OWNER_ID_UZ }}
+          GATE_KEY: ${{ secrets.GATE_KEY_UZ }}
+          GATE_URL: https://manhwa-gate-uz.compass-crm.workers.dev
+          ADMINS_URL: https://manhwa-gate-uz.compass-crm.workers.dev/admins
+          OCR_ENGINE: fast
+          BOT_SLOT: "1"
+        run: .venv/bin/python runner.py
