@@ -47,8 +47,13 @@ jobs:
           FONT_STYLES: "1"
           # Ochiq bot: tarjimadan hamma foydalanadi (qoidalar/adminlar - faqat adminlarga)
           PUBLIC_BOT: "1"
-          # Oddiy foydalanuvchiga 1 ta bepul bob, keyin egasiga murojaat (@sharofovsaid)
+          # Oddiy foydalanuvchiga 1 ta bepul bob, keyin paket (pastda PACKS)
           FREE_CHAPTERS: "1"
+          # OYLIK OBUNA EMAS (2026-10-01, foydalanuvchi: "bu botda oylik obuna emas tarjimasiga
+          # summa bo'lsin"): boblar paketi - 100 bob 30 ming, 200 ta 50 ming, 300 taga 80 ming so'm.
+          # To'lovdan keyin admin paketni beradi (/paket @user 200), har tarjima qilingan bob
+          # balansdan bitta yechiladi; ish bajarilmasa qaytariladi.
+          PACKS: "100:30000,200:50000,300:80000"
           # Bitta odam kuniga eng ko'pi 200 bob (adminlar cheklanmaydi; Toshkent 00:00 da yangilanadi)
           DAILY_LIMIT: "200"
           # Buyurtma dizayni (shop.py): 6 tugmali menyu, bosqichli buyurtma, Buyurtmalarim, /admin panel
