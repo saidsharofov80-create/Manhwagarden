@@ -38,10 +38,26 @@ jobs:
           GATE_URL: https://manhwa-gate.compass-crm.workers.dev
           ADMINS_URL: https://manhwa-gate.compass-crm.workers.dev/admins
           OCR_ENGINE: fast
-          # Tozalash v2: orqa fon (gradient, soya, rasm) saqlanadi - faqat shu bot
+          # Tozalash v2: orqa fon (gradient, soya, rasm) saqlanadi
           RENDER_V2: "1"
-          # Tarjimani Gemini tahrirlaydi (faqat shu bot - foydalanuvchi talabi)
+          # Tarjimani Gemini tahrirlaydi
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 2026-10-01: @Manhwatarjima1_bot darajasiga tenglashtirildi (foydalanuvchi: "shu botni
+          # manhwatarjima1_bot darajasigacha yaxshilab ber"). FAQAT sifat va tezlik olindi - bu bot
+          # YOPIQ qoladi, shuning uchun PUBLIC_BOT / FREE_CHAPTERS / PACKS / SHOP_UI / DAILY_LIMIT YO'Q.
+          # Pufakcha shakliga qarab shrift (oval/to'rtburchak/tikanli/rasm ustida/tizim oynasi).
+          # Tozalash v3 va sizish himoyasi ham shu bayroq ostida (image_editor).
+          FONT_STYLES: "1"
+          # Bob bir yo'la tarjima: Gemini'ga sahifa boshiga emas, 40 qatorlik bo'laklarda
+          # (13 sahifali bob: 13 so'rov -> 1-2). Lite modellar ham "low" fikrlash bilan (sifat uchun).
+          CHAPTER_BATCH: "1"
+          GEMINI_CHUNK: "40"
+          GEMINI_MODELS: "gemini-3.5-flash:low,gemini-3.8-flash:low,gemini-3.7-flash:low,gemini-3.6-flash:low,gemini-3-flash-preview:low,gemini-3.5-flash-lite:low,gemini-3.1-flash-lite:low,gemini-3.1-flash-lite-preview:low,gemma-4-31b-it"
+          # Navbatsiz: bir vaqtda 3 ta ish, bo'sh foydalanuvchi oldinga (bot.py _pick_job)
+          PARALLEL_JOBS: "3"
+          # 20 MB dan katta fayllar (bigfile.py, MTProto)
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
           # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
           IDLE_EXIT: "999999"
           BOT_SLOT: "1"

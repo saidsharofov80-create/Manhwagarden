@@ -157,6 +157,8 @@ def add_used(user_id: int, delta: int = 1) -> None:
 import time as _time
 
 SUB_DAYS = int(os.getenv("SUB_DAYS", "30") or 30)
+# HAFTALIK OBUNA (2026-10-01, foydalanuvchi talabi): arzonroq, qisqa muddatli tarif.
+SUB_WEEK_DAYS = int(os.getenv("SUB_WEEK_DAYS", "7") or 7)
 
 
 def _subs(data: dict) -> dict:
@@ -269,14 +271,30 @@ def _parse_packs(raw: str) -> list[tuple[int, int]]:
 
 PACKS = _parse_packs(os.getenv("PACKS", ""))
 PACKS_ON = bool(PACKS)
+# CHEGIRMA (2026-10-01, foydalanuvchi: "bu oy uchun chegirma deginda"): PACKS_OLD - ustidan
+# chiziladigan eski narx, PACKS_NOTE - chegirma matni. Ikkisi ham sozlamada (env), kodda emas -
+# chegirma tugaganda PACKS_OLD/PACKS_NOTE ni olib tashlash yetarli (yoki matnni o'zgartirish).
+PACKS_OLD = dict(_parse_packs(os.getenv("PACKS_OLD", "")))
+PACKS_NOTE = os.getenv("PACKS_NOTE", "").strip()
 
 
 def money(summa: int) -> str:
     return f"{summa:,}".replace(",", " ") + " so'm"
 
 
+def _price_text(n: int, price: int) -> str:
+    """Chegirma bo'lsa: eski narx ustidan chizilgan + yangisi."""
+    old = PACKS_OLD.get(n, 0)
+    return f"<s>{money(old)}</s> <b>{money(price)}</b>" if old > price else f"<b>{money(price)}</b>"
+
+
 def pack_lines(bullet: str = "• ") -> str:
-    return chr(10).join(f"{bullet}<b>{n} ta bob</b> - {money(p)}" for n, p in PACKS)
+    return chr(10).join(f"{bullet}{n} ta bob - {_price_text(n, p)}" for n, p in PACKS)
+
+
+def pack_block(bullet: str = "• ") -> str:
+    """Chegirma matni (bo'lsa) + paketlar ro'yxati."""
+    return (f"{PACKS_NOTE}\n" if PACKS_NOTE else "") + pack_lines(bullet)
 
 
 def balance(user_id: int) -> int:
@@ -317,3 +335,30 @@ def free_left(user_id: int) -> int:
 def is_paying(user_id: int) -> bool:
     """Pullik foydalanuvchi: oylik obunasi faol yoki paket balansi bor."""
     return is_paid(user_id) or (PACKS_ON and balance(user_id) > 0)
+
+
+# SERIYA LUG'ATI (2026-10-01): {seriya_kaliti: {"LIM DUWON": "Lim Duvon", ...}}. Ismlar boblar
+# orasida ham bir xil bo'lsin. Kalit - foydalanuvchi + seriya nomi, shuning uchun bir odamning
+# lug'ati boshqasiga o'tmaydi.
+GLOSSARY_SERIES_MAX = 60
+
+
+def get_glossary(key: str) -> dict:
+    g = _load().get("glossary", {}).get(key)
+    return dict(g) if isinstance(g, dict) else {}
+
+
+def put_glossary(key: str, names: dict) -> None:
+    if not names:
+        return
+    data = _load()
+    gl = data.setdefault("glossary", {})
+    cur = gl.get(key) if isinstance(gl.get(key), dict) else {}
+    merged = {**names, **cur}                 # avval saqlangan yozilish ustun (barqarorlik)
+    if merged == cur:
+        return
+    gl[key] = merged
+    if len(gl) > GLOSSARY_SERIES_MAX:         # eng eskilarini tashlash
+        for old in list(gl)[:len(gl) - GLOSSARY_SERIES_MAX]:
+            gl.pop(old, None)
+    _save(data)

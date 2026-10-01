@@ -210,9 +210,10 @@ def _screen(name: str, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
                 [_btn("ℹ️ Yordam", "m:yordam")]]
         if admins.PACKS_ON:
             rows.insert(0, [_btn(f"💰 Boblar paketi - {admins.PACKS[0][0]} bob "
-                                 f"{admins.money(admins.PACKS[0][1])}", "m:obuna")])
+                                 f"{admins.money(admins.PACKS[0][1])}"
+                                 + (" 🔥" if admins.PACKS_NOTE else ""), "m:obuna")])
         elif admins.FREE_CHAPTERS:
-            rows.insert(0, [_btn(f"💳 Oylik obuna - chegirmada {SUB_PRICE} 🔥", "m:obuna")])
+            rows.insert(0, [_btn(f"💳 Obuna - haftalik {SUB_WEEK_PRICE} 🔥", "m:obuna")])
     if admins.is_superadmin(user_id):
         rows.append([_btn("👑 Adminlar", "m:admins")]
                     + ([_btn(_pay_btn(), "m:do:paid")] if admins.FREE_CHAPTERS or admins.PACKS_ON else []))
@@ -260,6 +261,10 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     parts = query.data.split(":")
     if parts[1] == "qoidalar" and not admins.is_admin(update.effective_user.id):
         parts[1] = "main"
+    # SHOP_UI da bosh menyu BITTA: do'kon ekrani (ikki xil "menyu" chalkashtirmasin)
+    if parts[1] == "main" and shop.ENABLED:
+        await shop.start(update, context)
+        return
     if parts[1] != "do":
         await _show(update, parts[1])
         return
@@ -726,6 +731,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
            "name": fname, "who": update.effective_user.full_name or str(user_id),
            "cancelled": False, "free": charged, "bal": bal_charged, "daily": daily,
            "status": await msg.reply_text(text)}
+    # Tezkor yo'l ham tarixga tushadi (\U0001f4c2 Tarjimalarim) va natijasi saqlanadi
+    if shop.ENABLED:
+        okind = ("admin" if admins.is_admin(user_id) else "obuna" if admins.is_paid(user_id)
+                 else "bepul" if charged else "paket" if bal_charged else "admin")
+        item = msg.photo[-1] if msg.photo else msg.document
+        fkind = "pdf" if (msg.document and "pdf" in ((msg.document.mime_type or "") + (msg.document.file_name or "")).lower()) \
+            else "zip" if (msg.document and any(x in ((msg.document.mime_type or "") + (msg.document.file_name or "")).lower()
+                                                for x in ("zip", "cbz"))) else "img"
+        try:
+            job["order"] = shop.quick_record(
+                update.effective_user,
+                [{"id": item.file_id, "mid": msg.message_id, "size": getattr(item, "file_size", 0) or 0,
+                  "kind": fkind, "name": getattr(msg.document, "file_name", "") or ""}], okind)
+            job["quick"] = True
+        except Exception:
+            logger.warning("Tarixga yozilmadi", exc_info=True)
     _waiting.append(job)
     await _queue.put(job)
     logger.info("Navbatga qo'yildi: user=%s, oldinda=%d", user_id, ahead)
@@ -736,6 +757,7 @@ _owner_contact: dict = {}
 
 
 SUB_PRICE = os.getenv("SUB_PRICE", "50 000 so'm")
+SUB_WEEK_PRICE = os.getenv("SUB_WEEK_PRICE", "25 000 so'm")
 SUB_OLD_PRICE = os.getenv("SUB_OLD_PRICE", "")      # bo'lsa - ustidan chizilgan eski narx
 
 
@@ -762,7 +784,7 @@ def _pack_panel(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
               "🎁 Bepul bobingizdan foydalandingiz.")
     text = ("💰 <b>Boblar paketi</b>\n\n"
             "Oylik obuna yo'q - to'lov faqat tarjima qilinadigan boblar soniga:\n"
-            + admins.pack_lines() + "\n\n"
+            + admins.pack_block() + "\n\n"
             "• Paket muddatsiz: boblar tugaguncha ishlatasiz\n"
             "• Har tarjima qilingan bob balansdan bitta yechiladi\n"
             "• Ish bajarilmasa (xato/bekor) - bob qaytariladi\n\n"
@@ -790,9 +812,11 @@ def _sub_panel(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     else:
         left = max(0, admins.FREE_CHAPTERS - admins.used_chapters(user_id))
         status = f"🎁 Bepul boblar qoldi: <b>{left}</b> ta."
-    text = (f"💳 <b>Oylik obuna</b>\n\n"
-            f"🔥 Chegirmada: {old}<b>{SUB_PRICE}</b> / {admins.SUB_DAYS} kun\n"
-            f"• {admins.SUB_DAYS} kun davomida cheklovsiz tarjima\n\n{status}\n\n"
+    text = (f"💳 <b>Obuna</b>\n\n"
+            f"🔥 <b>Haftalik</b> - {SUB_WEEK_PRICE} / {admins.SUB_WEEK_DAYS} kun\n"
+            f"🔥 <b>Oylik</b> - {old}{SUB_PRICE} / {admins.SUB_DAYS} kun\n"
+            f"• Obuna muddati davomida cheklovsiz tarjima\n"
+            f"• Obunani istalgan vaqt uzaytirish mumkin\n\n{status}\n\n"
             f"To'lov uchun pastdagi tugmani bosib, egasiga yozing va ID'ingizni yuboring: "
             f"<code>{user_id}</code>")
     rows = []
@@ -823,11 +847,11 @@ async def _ask_owner_to_pay(context, user) -> None:
             text=(f"💳 Bepul bobi tugagan foydalanuvchi:\n\n"
                   f"Ism: {user.full_name or user.id}{handle}\nID: {user.id}\n\n"
                   + ("To'lov qilsa - pastdagi tugmalardan paketini bering."
-                     if admins.PACKS_ON else "To'lov qilsa - pastdagi tugma bilan 1 oylik bering.")),
+                     if admins.PACKS_ON else "To'lov qilsa - pastdagi tugmalardan birini bosing.")),
             reply_markup=InlineKeyboardMarkup(
                 [_pack_buttons(user.id)] if admins.PACKS_ON else
-                [[InlineKeyboardButton("✅ To'ladi - 1 oylik berish",
-                                       callback_data=f"paid:{user.id}")]]))
+                [[InlineKeyboardButton(f"✅ 1 hafta ({SUB_WEEK_PRICE})", callback_data=f"paidw:{user.id}")],
+                 [InlineKeyboardButton(f"✅ 1 oy ({SUB_PRICE})", callback_data=f"paid:{user.id}")]]))
     except TelegramError as exc:
         logger.warning("Egasiga to'lov xabari yuborilmadi: %s", exc)
 
@@ -857,7 +881,8 @@ async def on_paid_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     await query.answer()
     action, _, raw = query.data.partition(":")
-    await _set_paid(context, int(raw), action == "paid", query=query)
+    days = admins.SUB_WEEK_DAYS if action == "paidw" else None
+    await _set_paid(context, int(raw), action in ("paid", "paidw"), query=query, days=days)
 
 
 async def _label(context, uid: int) -> str:
@@ -869,7 +894,8 @@ async def _label(context, uid: int) -> str:
         return str(uid)
 
 
-async def _set_paid(context, target: int, grant: bool, query=None, message=None, n: int = 0) -> None:
+async def _set_paid(context, target: int, grant: bool, query=None, message=None, n: int = 0,
+                    days: int | None = None) -> None:
     who = await _label(context, target)
     if admins.PACKS_ON:                  # oylik obuna emas - balansga N ta bob
         if grant:
@@ -893,8 +919,9 @@ async def _set_paid(context, target: int, grant: bool, query=None, message=None,
             await message.reply_text(text)
         return
     if grant:
-        until = admins.add_paid(target)
-        text = f"✅ {who} ({target}) - obuna {_date(until)} gacha."
+        until = admins.add_paid(target, days)
+        label = f"{days} kunlik" if days else f"{admins.SUB_DAYS} kunlik"
+        text = f"✅ {who} ({target}) - {label} berildi, obuna {_date(until)} gacha."
         try:
             await context.bot.send_message(
                 target, f"✅ To'lovingiz qabul qilindi! Obuna faol: {_date(until)} gacha.\n"
@@ -921,6 +948,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     cmd = (update.effective_message.text or "").split()[0].lower()
     grant = "olish" not in cmd
+    days = admins.SUB_WEEK_DAYS if "haftalik" in cmd else None
     if context.args:
         target = admins.find_user(context.args[0])
         if target is None:
@@ -929,7 +957,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "yoki uning ID raqamini yuboring (ID'ni u botdagi 💳 Oylik obuna bo'limida ko'radi).")
             return
         n = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 0
-        await _set_paid(context, target, grant, message=update.effective_message, n=n)
+        await _set_paid(context, target, grant, message=update.effective_message, n=n, days=days)
         return
     if not grant:
         await update.effective_message.reply_text(
@@ -952,7 +980,7 @@ async def paid_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                             _btn("🗑", f"unpaid:{uid}")])
         buttons.append([_btn("➕ Odam qo'shish (paket)", "m:do:subadd")])
         await update.effective_message.reply_text(
-            "💰 <b>Paket olganlar</b>\n\n" + admins.pack_lines() + "\n\n"
+            "💰 <b>Paket olganlar</b>\n\n" + admins.pack_block() + "\n\n"
             + ("\n".join(html.escape(x) for x in lines) or "Hozircha hech kim.")
             + "\n\nQo'shish: tugmani bosib @username yoki ID yuboring, yoki /paket @username 200",
             reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
@@ -965,19 +993,40 @@ async def paid_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             lines.append(f"✅ {who} - {_date(until)} gacha ({int((until - now) // 86400)} kun qoldi)")
         else:
             lines.append(f"⌛ {who} - tugagan ({_date(until)})")
-        buttons.append([InlineKeyboardButton(f"🔁 +1 oy: {who}"[:60], callback_data=f"paid:{uid}"),
+        buttons.append([InlineKeyboardButton(f"🔁 +1 hafta: {who}"[:40], callback_data=f"paidw:{uid}"),
+                        InlineKeyboardButton("+1 oy", callback_data=f"paid:{uid}"),
                         InlineKeyboardButton("🗑", callback_data=f"unpaid:{uid}")])
-    buttons.append([_btn("➕ Odam qo'shish (1 oy)", "m:do:subadd")])
+    buttons.append([_btn("➕ Odam qo'shish", "m:do:subadd")])
     await update.effective_message.reply_text(
-        "📅 <b>Bir oylik obunachilar</b>\n\n" + ("\n".join(html.escape(x) for x in lines) or "Hozircha hech kim.") +
-        "\n\nQo'shish: tugmani bosib @username yoki ID yuboring, yoki /oylik @username",
+        f"📅 <b>Obunachilar</b>\n(haftalik {SUB_WEEK_PRICE} · oylik {SUB_PRICE})\n\n" + ("\n".join(html.escape(x) for x in lines) or "Hozircha hech kim.") +
+        "\n\nQo'shish: tugmani bosib @username yoki ID yuboring.\n"
+        "Buyruq bilan: /haftalik @username · /oylik @username · /oylikolish @username",
         reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 
-def _mark_delivered() -> None:
+def _mark_delivered(sent=None, caption: str = "") -> None:
+    """Natija yetib bordi. Yuborilgan xabar berilsa - natija file_id tarixga saqlanadi:
+    "\U0001f4e5 Natijani qayta yuborish" tarjimani qayta ishlatmaydi va hisobdan yechmaydi."""
     job = _job_var.get() or _current["job"]
-    if job is not None:
-        job["delivered"] = True
+    if job is None:
+        return
+    job["delivered"] = True
+    ref = job.get("order")
+    if sent is None or not ref or not shop.ENABLED:
+        return
+    try:
+        if getattr(sent, "document", None):
+            shop.save_result(ref, sent.document.file_id, "doc", caption)
+        elif getattr(sent, "photo", None):
+            shop.save_result(ref, sent.photo[-1].file_id, "photo", caption)
+    except Exception:
+        logger.warning("Natija saqlanmadi (%s)", ref, exc_info=True)
+
+
+def _fail_note() -> str:
+    """Xato xabarlariga: hisob va fayllar holati (foydalanuvchi nima qilishini bilsin)."""
+    return ("\n\nHisobdan yechilmadi (qaytarildi). Fayllaringiz saqlangan: "
+            "\U0001f4c2 Tarjimalarim \u2192 bobni ochib \U0001f501 Qayta urinish." if shop.ENABLED else "")
 
 
 def _after_markup() -> InlineKeyboardMarkup | None:
@@ -1052,14 +1101,15 @@ async def _worker_loop() -> None:
         _job_var.set(job)
         await _refresh_positions()
         try:
-            if job.get("order"):
-                await shop.process_order(job)
+            if job.get("order") and not job.get("quick"):
+                await shop.process_order(job)          # yuklash seansi (bir nechta fayl)
             else:
                 await _process_photo(job["update"], job["context"], job["status"])
         except Exception:
             logger.exception("Ish xatosi (user=%s)", job["user"])
             _refund(job)
-            await _edit_status(job["status"], "Kechirasiz, kutilmagan xatolik yuz berdi.")
+            await _edit_status(job["status"], "\u26a0\ufe0f Kutilmagan xatolik - bu bob tarjima "
+                               "qilinmadi." + _fail_note())
         finally:
             if not job.get("delivered"):
                 _refund(job)            # natija yetib bormadi - bepul bob sarflanmaydi
@@ -1184,7 +1234,8 @@ def _archive(job: str, name: str, data: bytes) -> None:
 CHAPTER_BATCH = os.getenv("CHAPTER_BATCH", "") == "1"
 
 
-async def _chapter_batch(pages, limit: int, budget: dict, status_msg, t0: float):
+async def _chapter_batch(pages, limit: int, budget: dict, status_msg, t0: float,
+                         report: dict | None = None):
     reads: list[list[dict]] = []
     failed: list[int] = []
     for num, _total, jpeg in pages:
@@ -1209,13 +1260,15 @@ async def _chapter_batch(pages, limit: int, budget: dict, status_msg, t0: float)
     for item in done:
         per_page[item.pop("_page")].append(item)
     await _edit_status(status_msg, "Sahifalarga yozilmoqda...")
-    sem = asyncio.Semaphore(3)
+    # Chizish ham xotira ham CPU talab qiladi: parallel ish ko'p bo'lsa, har ishda kamroq
+    # sahifa bir vaqtda chiziladi (jami ~8 ta sahifa - xotira to'lib ketmasin).
+    sem = asyncio.Semaphore(max(1, 8 // max(1, PARALLEL_JOBS)))
 
     async def draw(jpeg: bytes, items: list[dict]) -> bytes:
         if not items:
             return jpeg
         async with sem:
-            return await asyncio.to_thread(render_translation, jpeg, items, PDF_JPEG_QUALITY)
+            return await asyncio.to_thread(render_translation, jpeg, items, PDF_JPEG_QUALITY, report)
 
     out = await asyncio.gather(*(draw(jpeg, items) for (_, _, jpeg), items in zip(pages, per_page)))
     return list(out), sum(len(i) for i in per_page), failed
@@ -1255,6 +1308,10 @@ async def _process_pdf(update: Update | None, context: ContextTypes.DEFAULT_TYPE
         await status_msg.edit_text("PDF sahifalarini rasmga aylantirib bo'lmadi.")
         return
 
+    # Seriya lug'ati: ismlar shu seriyaning oldingi boblaridagidek yoziladi
+    uz_translate.set_series(chat_id, src_name)
+    uz_translate.reset_stats()
+    report: dict = {}
     budget = {"vlm": VLM_BUDGET_PER_PDF}
     out_pages: list[bytes] = []
     failed: list[int] = []
@@ -1267,10 +1324,11 @@ async def _process_pdf(update: Update | None, context: ContextTypes.DEFAULT_TYPE
         items = await asyncio.to_thread(finish_page, read) if read else []
         if not items:
             return jpeg, 0                    # matnsiz sahifa - aslicha (PDF to'liq bo'lsin)
-        return await asyncio.to_thread(render_translation, jpeg, items, PDF_JPEG_QUALITY), len(items)
+        drawn = await asyncio.to_thread(render_translation, jpeg, items, PDF_JPEG_QUALITY, report)
+        return drawn, len(items)
 
     if CHAPTER_BATCH:
-        out_pages, texts, failed = await _chapter_batch(pages, limit, budget, status_msg, t0)
+        out_pages, texts, failed = await _chapter_batch(pages, limit, budget, status_msg, t0, report)
     pending: list[asyncio.Task] = []
     for num, _total, jpeg in ([] if CHAPTER_BATCH else pages):
         elapsed = int(time.time() - t0)
@@ -1291,7 +1349,8 @@ async def _process_pdf(update: Update | None, context: ContextTypes.DEFAULT_TYPE
         out_pages.append(page_bytes)
         texts += n
 
-    await _edit_status(status_msg, "PDF yig'ilmoqda...")
+    await _edit_status(status_msg, "Natija tekshirilmoqda...")
+    uz_translate.save_series()
     fitted, size_note = await asyncio.to_thread(pdf_utils.fit_size, out_pages)
     result_pdf = await asyncio.to_thread(pdf_utils.build_pdf, fitted)
     _archive(job, "natija.pdf", result_pdf)
@@ -1303,13 +1362,23 @@ async def _process_pdf(update: Update | None, context: ContextTypes.DEFAULT_TYPE
                f"vaqt: {elapsed // 60}:{elapsed % 60:02d}.")
     if failed:
         caption += f"\nTarjima qilinmagan sahifalar (aslicha qoldi): {', '.join(map(str, failed))}"
+    # Ochiq hisobot: nimaga ishonish mumkin, nimani ko'rib chiqish kerak
+    st = uz_translate.stats()
+    if st["google"] and (st["ai"] + st["google"]):
+        share = 100 * st["google"] // (st["ai"] + st["google"])
+        if share >= 10:
+            caption += (f"\n\u26a0\ufe0f Matnning {share}% i AI'siz (Google) tarjima qilindi - "
+                        "AI limiti tugagan yoki band bo'lgan.")
+    if report.get("tiny"):
+        caption += (f"\n\u26a0\ufe0f {report['tiny']} ta joyda matn pufakchaga sig'masdan juda "
+                    "mayda chiqdi - o'sha sahifalarni tekshirib ko'ring.")
     if budget["vlm"] <= 0 and VLM_BUDGET_PER_PDF:
         caption += "\nBa'zi qiyin joylar tezlik uchun o'tkazib yuborilgan bo'lishi mumkin."
 
     await _edit_status(status_msg, "Yuborilmoqda...")
     for attempt in range(4):
         try:
-            await context.bot.send_document(
+            sent = await context.bot.send_document(
                 chat_id=chat_id,
                 document=io.BytesIO(result_pdf),
                 filename=f"{src_name} (o'zbekcha).pdf",
@@ -1318,7 +1387,7 @@ async def _process_pdf(update: Update | None, context: ContextTypes.DEFAULT_TYPE
                 write_timeout=900, read_timeout=300,
                 reply_markup=shop.after_markup(ref) if shop.ENABLED else _after_markup(),
             )
-            _mark_delivered()
+            _mark_delivered(sent, caption)
             break
         except RetryAfter as exc:
             raw = getattr(exc, "retry_after", 5)
@@ -1383,12 +1452,13 @@ async def _process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, sta
         result_bytes, translations = result
         logger.info("Chizildi: %.0f KB", len(result_bytes) / 1024)
 
-        await _send_result(context, chat_id, result_bytes, _caption(translations))
-        _mark_delivered()
+        cap = _caption(translations)
+        sent = await _send_result(context, chat_id, result_bytes, cap)
+        _mark_delivered(sent, cap)
         await status_msg.delete()
     except TranslationError as exc:
         logger.warning("Tarjima xatosi (user=%s): %s", update.effective_user.id, exc)
-        await status_msg.edit_text(str(exc))
+        await status_msg.edit_text(str(exc) + _fail_note())
     except TelegramError as exc:
         logger.exception("Telegram xatosi (user=%s)", update.effective_user.id)
         await status_msg.edit_text(
@@ -1397,13 +1467,13 @@ async def _process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, sta
     except Exception:
         logger.exception("Kutilmagan xatolik (user=%s)", update.effective_user.id)
         await status_msg.edit_text(
-            "Kechirasiz, kutilmagan xatolik yuz berdi. Birozdan so'ng qayta urinib ko'ring."
+            "\u26a0\ufe0f Kutilmagan xatolik - bob tarjima qilinmadi." + _fail_note()
         )
     finally:
         typing_task.cancel()
 
 
-async def _send_result(context: ContextTypes.DEFAULT_TYPE, chat_id: int, image_bytes: bytes, caption: str) -> None:
+async def _send_result(context: ContextTypes.DEFAULT_TYPE, chat_id: int, image_bytes: bytes, caption: str):
     from PIL import Image as PILImage
 
     with PILImage.open(io.BytesIO(image_bytes)) as im:
@@ -1415,18 +1485,16 @@ async def _send_result(context: ContextTypes.DEFAULT_TYPE, chat_id: int, image_b
     for attempt in range(4):
         try:
             if as_document:
-                await context.bot.send_document(
+                return await context.bot.send_document(
                     chat_id=chat_id,
                     document=io.BytesIO(image_bytes),
                     filename="tarjima.jpg",
                     caption=caption, reply_markup=shop.after_markup(None) if shop.ENABLED else _after_markup(),
                 )
-            else:
-                await context.bot.send_photo(
-                    chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=caption,
-                    reply_markup=shop.after_markup(None) if shop.ENABLED else _after_markup(),
-                )
-            return
+            return await context.bot.send_photo(
+                chat_id=chat_id, photo=io.BytesIO(image_bytes), caption=caption,
+                reply_markup=shop.after_markup(None) if shop.ENABLED else _after_markup(),
+            )
         except RetryAfter as exc:
             raw = getattr(exc, "retry_after", 5)
             if hasattr(raw, "total_seconds"):          # yangi versiyalarda timedelta
@@ -1560,7 +1628,7 @@ def _build_app(token: str) -> Application:
     app.add_handler(CommandHandler("addadmin", add_admin_cmd))
     app.add_handler(CommandHandler("removeadmin", remove_admin_cmd))
     app.add_handler(CommandHandler("qoida", rules_cmd))
-    app.add_handler(CommandHandler(["oylik", "ruxsat", "paket"], paid_cmd))
+    app.add_handler(CommandHandler(["oylik", "haftalik", "ruxsat", "paket"], paid_cmd))
     app.add_handler(CommandHandler(["oylikolish", "ruxsatolish", "paketolish"], paid_cmd))
     app.add_handler(CommandHandler("qoidaochir", remove_rule_cmd))
     app.add_handler(MessageHandler(
@@ -1580,7 +1648,7 @@ def _build_app(token: str) -> Application:
     app.add_handler(CallbackQueryHandler(on_queue_button, pattern=r"^qcancel:"))
     app.add_handler(CallbackQueryHandler(on_menu_button, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(shop.on_button, pattern=r"^sh:"))
-    app.add_handler(CallbackQueryHandler(on_paid_button, pattern=r"^(paid|unpaid):\d+$"))
+    app.add_handler(CallbackQueryHandler(on_paid_button, pattern=r"^(paid|paidw|unpaid):\d+$"))
     app.add_handler(CallbackQueryHandler(on_pack_button, pattern=r"^pack:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(on_rule_delete, pattern=r"^rdel:\d+$"))
     app.add_handler(CallbackQueryHandler(on_admin_button, pattern=r"^(allow|deny|remove):"))
