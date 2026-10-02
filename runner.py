@@ -27,7 +27,27 @@ GATE_URL = os.environ["GATE_URL"].rstrip("/")
 GATE_KEY = os.environ["GATE_KEY"]
 IDLE_EXIT = int(os.getenv("IDLE_EXIT", "300"))        # shuncha soniya ish bo'lmasa - o'chadi
 MAX_LIFE = int(os.getenv("MAX_LIFE", str(5 * 3600)))  # GitHub chegarasi 6 soat
-POLL_EVERY = 1.5
+# SO'ROVNI TEJASH (2026-10-02): Cloudflare bepul tarifida kuniga 100 000 so'rov - hisobdagi HAMMA
+# worker uchun umumiy. Har 1.5 s da so'rash = bitta botdan kuniga 57 600 so'rov, ya'ni ikkita bot
+# ishlasa limit tugaydi va BARCHA darvozalar (hamda compass-crm, mobil-dokon) 429 qaytaradi.
+# Shuning uchun so'rash tezligi ishga qarab o'zgaradi: ish bor paytda tez, jim turganda sekin.
+#   ish bor / yangi tugagan   -> POLL_EVERY  (1.5 s, javob darhol)
+#   POLL_SLOW_AFTER dan keyin -> POLL_MID    (3 s)
+#   POLL_IDLE_AFTER dan keyin -> POLL_IDLE   (10 s)
+# Jim turgan bot kuniga ~9 000 so'rov sarflaydi - to'rtta bot ham bemalol sig'adi.
+# Eng yomon holatda birinchi xabar 10 s kechikadi, keyin esa yana tez ishlaydi.
+POLL_EVERY = float(os.getenv("POLL_EVERY", "1.5"))
+POLL_MID = float(os.getenv("POLL_MID", "3"))
+POLL_IDLE = float(os.getenv("POLL_IDLE", "10"))
+POLL_SLOW_AFTER = float(os.getenv("POLL_SLOW_AFTER", "30"))
+POLL_IDLE_AFTER = float(os.getenv("POLL_IDLE_AFTER", "120"))
+
+
+def poll_delay(quiet: float) -> float:
+    """Oxirgi ishdan beri `quiet` soniya o'tgan - keyingi so'rovgacha qancha kutiladi."""
+    if quiet < POLL_SLOW_AFTER:
+        return POLL_EVERY
+    return POLL_MID if quiet < POLL_IDLE_AFTER else POLL_IDLE
 
 
 async def main() -> None:
@@ -62,7 +82,7 @@ async def main() -> None:
                 last_activity = time.time()
             if not busy and app.update_queue.empty() and (old or time.time() - last_activity > IDLE_EXIT):
                 break
-            await asyncio.sleep(POLL_EVERY)
+            await asyncio.sleep(poll_delay(time.time() - last_activity))
         try:   # gate darhol bilsin: endi kelgan xabar uchun yangi runner yoqiladi
             await c.post(f"{GATE_URL}/pending", headers=headers, params={"runner": "1", "retire": "1"})
         except Exception:
