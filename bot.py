@@ -1762,6 +1762,12 @@ async def _run() -> None:
             # og'ir darvozadan foydalansin degan qaror sababli).
             await hybrid.run(_start_app, _stop_app, _tell_owner)
             return
+        if HEARTBEAT_ROLE in hybrid.TIERS:
+            # HEARTBEAT_ROLE phone/laptop/github ga o'rnatilgan, lekin HEARTBEAT_URL/KEY yo'q (masalan,
+            # GitHub Actions'da sirlar hali qo'shilmagan) - bexato pastga tushib SHARTSIZ ishga
+            # tushishdan ko'ra, hech narsa qilmagan afzal (aks holda noutbuk/telefon bilan to'qnashadi).
+            logger.warning("HEARTBEAT_ROLE=%s, lekin HEARTBEAT_URL/KEY yo'q - bot ishga tushirilmadi", HEARTBEAT_ROLE)
+            return
         if HEARTBEAT_ROLE == "reserve" and HEARTBEAT_URL:
             await _run_reserve()
             return
