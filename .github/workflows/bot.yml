@@ -1,6 +1,13 @@
 name: bot
 on:
   workflow_dispatch:
+  # Uch bosqichli rejim (2026-10-02, hybrid.py): telefon (asosiy) > noutbuk > shu yer. Og'ir
+  # Cloudflare darvozasi (manhwa-gate) ENDI ISHLATILMAYDI - faqat @manhwatarjima_bot undan
+  # foydalanadi. Har 15 daqiqada tekshiradi: telefon/noutbuk tirik bo'lsa darrov chiqadi (bir
+  # necha soniya, deyarli ish vaqti sarflanmaydi); ikkalasi ham o'lik bo'lsagina ishga tushadi va
+  # ulardan biri qaytguncha yoki 330 daqiqalik chegaragacha xabar oladi.
+  schedule:
+    - cron: "*/15 * * * *"
 concurrency:
   group: bot
   cancel-in-progress: false
@@ -34,9 +41,12 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
-          GATE_KEY: ${{ secrets.GATE_KEY }}
-          GATE_URL: https://manhwa-gate.compass-crm.workers.dev
-          ADMINS_URL: https://manhwa-gate.compass-crm.workers.dev/admins
+          # Uch bosqichli tanlov (hybrid.py): manhwa-heartbeat juda yengil (D1'ga kuniga bir nechta
+          # yozuv/tomon) - @manhwatarjima_bot ning og'ir manhwa-gate* darvozalariga tegmaydi.
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+          HEARTBEAT_KEY: ${{ secrets.HEARTBEAT_KEY }}
+          HEARTBEAT_ROLE: github
+          HEARTBEAT_PREFIX: garden
           OCR_ENGINE: fast
           # Tozalash v2: orqa fon (gradient, soya, rasm) saqlanadi
           RENDER_V2: "1"
@@ -58,7 +68,5 @@ jobs:
           # 20 MB dan katta fayllar (bigfile.py, MTProto)
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          # Uxlamaydi: faqat 5 soatlik chegarada almashadi (darvoza ALWAYS_ON)
-          IDLE_EXIT: "999999"
           BOT_SLOT: "1"
-        run: .venv/bin/python runner.py
+        run: .venv/bin/python bot.py

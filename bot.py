@@ -1755,6 +1755,13 @@ async def _run() -> None:
     worker = asyncio.create_task(_queue_worker())
     tasks = [worker]
     try:
+        import hybrid
+        if hybrid.enabled():
+            # Uch bosqichli (telefon > noutbuk > GitHub): og'ir Cloudflare darvozasiz,
+            # yengil manhwa-heartbeat orqali (2026-10-02, faqat @manhwatarjima_bot
+            # og'ir darvozadan foydalansin degan qaror sababli).
+            await hybrid.run(_start_app, _stop_app, _tell_owner)
+            return
         if HEARTBEAT_ROLE == "reserve" and HEARTBEAT_URL:
             await _run_reserve()
             return
