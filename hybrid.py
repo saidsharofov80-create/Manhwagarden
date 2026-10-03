@@ -115,7 +115,8 @@ async def run(start_app, stop_app, tell_owner) -> None:
                     if age is not None and age <= FRESH_WITHIN:
                         break
                 log.info("Ustunroq tomon qaytdi - yangi xabar olish to'xtatildi, navbat tugatilmoqda")
-                await app.updater.stop()
+                if app.updater.running:   # stop_app() ham shu qadamni bosadi - ikki marta chaqirilsa xato beradi
+                    await app.updater.stop()
                 from bot import _active, _waiting   # aylanma import'dan qochish uchun shu yerda
                 while _waiting or _active:
                     await asyncio.sleep(5)
